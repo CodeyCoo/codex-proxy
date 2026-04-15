@@ -100,6 +100,7 @@ export async function* streamCodexToAnthropic(
   onUsage?: (usage: UsageInfo) => void,
   onResponseId?: (id: string) => void,
   wantThinking?: boolean,
+  precomputedInputTokens?: number,
 ): AsyncGenerator<string> {
   const msgId = `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
   let outputTokens = 0;
@@ -166,7 +167,7 @@ export async function* streamCodexToAnthropic(
       stop_reason: null,
       stop_sequence: null,
       usage: {
-        input_tokens: 0,
+        input_tokens: precomputedInputTokens ?? 0,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
         output_tokens: 0,
@@ -378,6 +379,7 @@ export async function collectCodexToAnthropicResponse(
   rawResponse: Response,
   model: string,
   wantThinking?: boolean,
+  precomputedInputTokens?: number,
 ): Promise<{
   response: AnthropicMessagesResponse;
   usage: UsageInfo;
@@ -446,8 +448,9 @@ export async function collectCodexToAnthropicResponse(
     content.push({ type: "text", text: "" });
   }
 
+  const finalInputTokens = inputTokens || precomputedInputTokens || 0;
   const usage: AnthropicUsage = {
-    input_tokens: inputTokens,
+    input_tokens: finalInputTokens,
     output_tokens: outputTokens,
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: cachedTokens ?? 0,

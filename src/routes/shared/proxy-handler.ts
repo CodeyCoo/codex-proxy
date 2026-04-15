@@ -142,7 +142,7 @@ export async function handleProxyRequest(
       ? `effort=${req.codexRequest.reasoning.effort ?? "none"} summary=${req.codexRequest.reasoning.summary ?? "none"}`
       : "off";
     console.log(
-      `[${fmt.tag}] Account ${entryId} | model=${req.model} | input_items=${inputItems} instr=${instrLen}B payload=${reqJson.length}B reasoning=[${reasoningField}]` +
+      `[${fmt.tag}] Account ${entryId} | model=${req.model} | stream=${req.isStreaming} | input_items=${inputItems} instr=${instrLen}B payload=${reqJson.length}B reasoning=[${reasoningField}]` +
       (prevRespId ? ` | affinity=${affinityHit ? "hit" : "miss"}` : ""),
     );
     if (reqJson.length > 50_000) {

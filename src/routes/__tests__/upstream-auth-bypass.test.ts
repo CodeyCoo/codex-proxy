@@ -287,7 +287,7 @@ describe("upstream direct routing without Codex auth", () => {
     }
   });
 
-  it("returns 501 for count_tokens on codex-backed Anthropic routes", async () => {
+  it("returns token count for count_tokens on codex-backed Anthropic routes", async () => {
     const pool = new AccountPool();
     const app = createMessagesRoutes(pool, undefined, undefined, {
       resolveMatch: vi.fn(() => ({ kind: "codex", adapter: { tag: "codex" } })),
@@ -304,18 +304,13 @@ describe("upstream direct routing without Codex auth", () => {
       }),
     });
 
-    expect(res.status).toBe(501);
-    await expect(res.json()).resolves.toEqual({
-      type: "error",
-      error: {
-        type: "api_error",
-        message: "/v1/messages/count_tokens is only supported for direct Anthropic-compatible upstreams",
-      },
-    });
+    expect(res.status).toBe(200);
+    const json = await res.json() as { input_tokens: number };
+    expect(json.input_tokens).toBeGreaterThan(0);
     pool.destroy();
   });
 
-  it("returns 404 for unknown models on Anthropic count_tokens route", async () => {
+  it("returns token count for unknown models on Anthropic count_tokens route", async () => {
     const pool = new AccountPool();
     const app = createMessagesRoutes(pool, undefined, undefined, {
       resolveMatch: vi.fn(() => ({ kind: "not-found" })),
@@ -332,18 +327,13 @@ describe("upstream direct routing without Codex auth", () => {
       }),
     });
 
-    expect(res.status).toBe(404);
-    await expect(res.json()).resolves.toEqual({
-      type: "error",
-      error: {
-        type: "not_found_error",
-        message: "Model 'unknown-model-xyz' not found",
-      },
-    });
+    expect(res.status).toBe(200);
+    const json = await res.json() as { input_tokens: number };
+    expect(json.input_tokens).toBeGreaterThan(0);
     pool.destroy();
   });
 
-  it("returns 501 for count_tokens on codex-backed routes even without login", async () => {
+  it("returns token count for count_tokens on codex-backed routes even without login", async () => {
     const pool = new AccountPool();
     const app = createMessagesRoutes(pool, undefined, undefined, {
       resolveMatch: vi.fn(() => ({ kind: "codex", adapter: { tag: "codex" } })),
@@ -360,14 +350,9 @@ describe("upstream direct routing without Codex auth", () => {
       }),
     });
 
-    expect(res.status).toBe(501);
-    await expect(res.json()).resolves.toEqual({
-      type: "error",
-      error: {
-        type: "api_error",
-        message: "/v1/messages/count_tokens is only supported for direct Anthropic-compatible upstreams",
-      },
-    });
+    expect(res.status).toBe(200);
+    const json = await res.json() as { input_tokens: number };
+    expect(json.input_tokens).toBeGreaterThan(0);
     pool.destroy();
   });
 

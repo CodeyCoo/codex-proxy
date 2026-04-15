@@ -29,6 +29,7 @@ import {
   parseModelName,
   buildDisplayModelName,
 } from "../models/model-store.js";
+import { countRequestInputTokens } from "../utils/tokenizer.js";
 import {
   handleProxyRequest,
   handleDirectRequest,
@@ -146,7 +147,7 @@ async function handleCountTokensDirectRequest(
   }
 }
 
-function makeAnthropicFormat(wantThinking: boolean): FormatAdapter {
+function makeAnthropicFormat(wantThinking: boolean, precomputedInputTokens?: number): FormatAdapter {
   return {
     tag: "Messages",
     noAccountStatus: 529 as StatusCode,
@@ -158,9 +159,9 @@ function makeAnthropicFormat(wantThinking: boolean): FormatAdapter {
     format429: (msg) => makeError("rate_limit_error", msg),
     formatError: (_status, msg) => makeError("api_error", msg),
     streamTranslator: (api, response, model, onUsage, onResponseId, _tupleSchema) =>
-      streamCodexToAnthropic(api, response, model, onUsage, onResponseId, wantThinking),
+      streamCodexToAnthropic(api, response, model, onUsage, onResponseId, wantThinking, precomputedInputTokens),
     collectTranslator: (api, response, model, _tupleSchema) =>
-      collectCodexToAnthropicResponse(api, response, model, wantThinking),
+      collectCodexToAnthropicResponse(api, response, model, wantThinking, precomputedInputTokens),
   };
 }
 
@@ -201,11 +202,7 @@ export function createMessagesRoutes(
     }
     const req = parsed.data;
 
-    const routeMatch = upstreamRouter?.resolveMatch(req.model) ?? { kind: "not-found" as const };
-    if (routeMatch.kind === "not-found") {
-      c.status(404);
-      return c.json(formatModelNotFound(req.model));
-    }
+    const routeMatch = upstreamRouter?.resolveMatch(req.model);
 
     const anthropicVersion = c.req.header("anthropic-version");
     const anthropicBeta = c.req.header("anthropic-beta");
@@ -215,7 +212,7 @@ export function createMessagesRoutes(
     };
 
     // Direct upstream routes bypass local auth — they carry their own API key
-    if (routeMatch.kind === "api-key" || routeMatch.kind === "adapter") {
+    if (routeMatch?.kind === "api-key" || routeMatch?.kind === "adapter") {
       return handleCountTokensDirectRequest(
         c,
         routeMatch,
@@ -224,11 +221,23 @@ export function createMessagesRoutes(
       );
     }
 
-    // Codex-backed routes don't support count_tokens — report this before auth check
-    c.status(501);
-    return c.json(
-      makeError("api_error", "/v1/messages/count_tokens is only supported for direct Anthropic-compatible upstreams"),
-    );
+    // Codex-backed routes: count tokens locally using tiktoken
+    const inputTokens = countRequestInputTokens({
+      model: req.model,
+      instructions: typeof req.system === "string"
+        ? req.system
+        : req.system?.map((b) => b.text).join("\n\n") ?? undefined,
+      input: req.messages.map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: typeof m.content === "string"
+          ? m.content
+          : m.content.map((b) => "text" in b ? (b as { text: string }).text : "").join("\n"),
+      })),
+      stream: true,
+      store: false,
+      tools: req.tools?.length ? req.tools.map((t) => ({ type: "function" as const, name: t.name, description: t.description ?? "", parameters: t.input_schema ?? {} })) : [],
+    });
+    return c.json({ input_tokens: inputTokens });
   });
 
   app.post("/v1/messages", async (c) => {
@@ -286,6 +295,7 @@ export function createMessagesRoutes(
     }
 
     const codexRequest = translateAnthropicToCodexRequest(req);
+    const precomputedInputTokens = countRequestInputTokens(codexRequest);
     const wantThinking = req.thinking?.type === "enabled" || req.thinking?.type === "adaptive";
     const anthropicVersion = c.req.header("anthropic-version");
     const anthropicBeta = c.req.header("anthropic-beta");
@@ -295,11 +305,11 @@ export function createMessagesRoutes(
     };
     const proxyReq = {
       codexRequest,
-      model: buildDisplayModelName(parseModelName(req.model)),
+      model: req.model, // preserve original Anthropic model name for SSE response
       isStreaming: req.stream,
       upstreamHeaders: Object.keys(upstreamHeaders).length > 0 ? upstreamHeaders : undefined,
     };
-    const fmt = makeAnthropicFormat(wantThinking);
+    const fmt = makeAnthropicFormat(wantThinking, precomputedInputTokens);
 
     if (routeMatch?.kind === "api-key" || routeMatch?.kind === "adapter") {
       const directReq = {
