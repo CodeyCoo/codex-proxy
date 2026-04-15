@@ -17,6 +17,8 @@ export interface CodexResponseData {
     cached_tokens?: number;
     reasoning_tokens?: number;
   };
+  stop_reason?: string;
+  stop_sequence?: string | null;
   [key: string]: unknown;
 }
 
@@ -187,6 +189,10 @@ function parseResponseData(data: unknown): CodexResponseData | undefined {
   if (!isRecord(resp)) return undefined;
   const result: CodexResponseData = {};
   if (typeof resp.id === "string") result.id = resp.id;
+  if (typeof resp.stop_reason === "string") result.stop_reason = resp.stop_reason;
+  if (typeof resp.stop_sequence === "string" || resp.stop_sequence === null) {
+    result.stop_sequence = resp.stop_sequence as string | null;
+  }
   if (isRecord(resp.usage)) {
     result.usage = {
       input_tokens: typeof resp.usage.input_tokens === "number" ? resp.usage.input_tokens : 0,

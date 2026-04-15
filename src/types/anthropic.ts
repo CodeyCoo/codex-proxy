@@ -89,6 +89,23 @@ const AnthropicThinkingAdaptiveSchema = z.object({
   budget_tokens: z.number().int().positive().optional(),
 });
 
+const AnthropicContainerSkillSchema = z.object({
+  type: z.string(),
+}).passthrough();
+
+const AnthropicContainerObjectSchema = z.object({
+  type: z.string().optional(),
+  id: z.string().optional(),
+  skills: z.array(AnthropicContainerSkillSchema).optional(),
+}).passthrough();
+
+const AnthropicContextManagementSchema = z.object({
+  clear_function_results: z.boolean().optional(),
+  edits: z.array(z.object({
+    type: z.string(),
+  }).passthrough()).optional(),
+}).passthrough();
+
 export const AnthropicMessagesRequestSchema = z.object({
   model: z.string(),
   max_tokens: z.number().int().positive(),
@@ -106,6 +123,8 @@ export const AnthropicMessagesRequestSchema = z.object({
       user_id: z.string().optional(),
     })
     .optional(),
+  container: z.union([z.string(), AnthropicContainerObjectSchema, z.null()]).optional(),
+  context_management: z.union([AnthropicContextManagementSchema, z.null()]).optional(),
   thinking: z
     .union([
       AnthropicThinkingEnabledSchema,
@@ -124,11 +143,54 @@ export const AnthropicMessagesRequestSchema = z.object({
     z.object({ type: z.literal("any") }),
     z.object({ type: z.literal("tool"), name: z.string() }),
   ]).optional(),
-});
+}).passthrough();
+
+export const AnthropicMessageCountTokensRequestSchema = z.object({
+  model: z.string(),
+  messages: z.array(AnthropicMessageSchema).min(1),
+  system: z
+    .union([z.string(), z.array(AnthropicTextContentSchema)])
+    .optional(),
+  cache_control: z.object({ type: z.string() }).passthrough().optional(),
+  container: z.union([z.string(), AnthropicContainerObjectSchema, z.null()]).optional(),
+  context_management: z.union([AnthropicContextManagementSchema, z.null()]).optional(),
+  mcp_servers: z.array(z.object({ type: z.string() }).passthrough()).optional(),
+  output_config: z.record(z.unknown()).optional(),
+  output_format: z.record(z.unknown()).optional(),
+  speed: z.enum(["standard", "fast"]).optional(),
+  thinking: z
+    .union([
+      AnthropicThinkingEnabledSchema,
+      AnthropicThinkingDisabledSchema,
+      AnthropicThinkingAdaptiveSchema,
+    ])
+    .optional(),
+  tools: z.array(z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    input_schema: z.record(z.unknown()).optional(),
+  }).passthrough()).optional(),
+  tool_choice: z.union([
+    z.object({ type: z.literal("auto") }),
+    z.object({ type: z.literal("any") }),
+    z.object({ type: z.literal("tool"), name: z.string() }),
+  ]).optional(),
+}).passthrough();
 
 export type AnthropicMessagesRequest = z.infer<
   typeof AnthropicMessagesRequestSchema
 >;
+
+export type AnthropicMessageCountTokensRequest = z.infer<
+  typeof AnthropicMessageCountTokensRequestSchema
+>;
+
+export interface AnthropicMessageTokensCountResponse {
+  input_tokens: number;
+  context_management?: {
+    original_input_tokens: number;
+  } | null;
+}
 
 // --- Response ---
 
@@ -154,9 +216,10 @@ export interface AnthropicMessagesResponse {
   role: "assistant";
   content: AnthropicContentBlock[];
   model: string;
-  stop_reason: "end_turn" | "max_tokens" | "stop_sequence" | "tool_use" | null;
+  stop_reason: "end_turn" | "max_tokens" | "stop_sequence" | "tool_use" | "pause_turn" | "refusal" | null;
   stop_sequence: string | null;
   usage: AnthropicUsage;
+  service_tier?: "standard" | "priority" | "batch" | null;
 }
 
 // --- Error ---
