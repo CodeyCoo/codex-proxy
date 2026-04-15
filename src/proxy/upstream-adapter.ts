@@ -8,6 +8,10 @@
 
 import type { CodexResponsesRequest, CodexSSEEvent } from "./codex-types.js";
 
+export interface UpstreamCountTokensOptions {
+  beta?: boolean;
+}
+
 export interface UpstreamAdapter {
   /** Short identifier used in logs (e.g. "codex", "openai", "anthropic"). */
   readonly tag: string;
@@ -19,7 +23,17 @@ export interface UpstreamAdapter {
   createResponse(
     req: CodexResponsesRequest,
     signal: AbortSignal,
+    extraHeaders?: Record<string, string>,
   ): Promise<Response>;
+  /**
+   * Optional native token-count endpoint for Anthropic-compatible /v1/messages/count_tokens.
+   */
+  countTokens?(
+    body: Record<string, unknown>,
+    signal: AbortSignal,
+    extraHeaders?: Record<string, string>,
+    options?: UpstreamCountTokensOptions,
+  ): Promise<Record<string, unknown>>;
   /**
    * Parse the upstream SSE response into a stream of Codex-normalized events.
    * Each adapter normalizes its native event format to CodexSSEEvent.

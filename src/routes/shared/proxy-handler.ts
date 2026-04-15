@@ -36,6 +36,8 @@ export interface ProxyRequest {
   isStreaming: boolean;
   /** Original schema before tuple→object conversion (for response reconversion). */
   tupleSchema?: Record<string, unknown> | null;
+  /** Optional headers to forward to compatible direct upstream adapters. */
+  upstreamHeaders?: Record<string, string>;
 }
 
 /** Format-specific adapter provided by each route. */
@@ -208,7 +210,7 @@ export async function handleProxyRequest(
           s.onAbort(() => abortController.abort());
           try {
             await streamResponse(
-              s, capturedApi, rawResponse, req.model, fmt,
+              s, capturedApi as UpstreamAdapter, rawResponse, req.model, fmt,
               (u) => { usageInfo = u; },
               req.tupleSchema,
               (id) => { capturedResponseId = id; },
@@ -311,7 +313,7 @@ async function handleNonStreaming(
   for (let attempt = 1; ; attempt++) {
     try {
       const result = await fmt.collectTranslator(
-        currentApi, currentRawResponse, req.model, req.tupleSchema,
+        currentApi as UpstreamAdapter, currentRawResponse, req.model, req.tupleSchema,
       );
       if (result.responseId && affinityMap && conversationId) {
         affinityMap.record(result.responseId, currentEntryId, conversationId, turnState);
@@ -400,7 +402,7 @@ export async function handleDirectRequest(
 
   let rawResponse: Response;
   try {
-    rawResponse = await upstream.createResponse(req.codexRequest, abortController.signal);
+    rawResponse = await upstream.createResponse(req.codexRequest, abortController.signal, req.upstreamHeaders);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Upstream request failed";
     const status = err instanceof CodexApiError ? err.status : 502;

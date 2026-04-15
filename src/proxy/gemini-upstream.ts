@@ -39,6 +39,7 @@ export class GeminiUpstream implements UpstreamAdapter {
   async createResponse(
     req: CodexResponsesRequest,
     signal: AbortSignal,
+    _extraHeaders?: Record<string, string>,
   ): Promise<Response> {
     const modelId = extractModelId(req.model);
     const body = translateCodexToGeminiRequest(req);

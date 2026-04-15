@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from "crypto";
-import type { UpstreamAdapter } from "./upstream-adapter.js";
+import type { UpstreamAdapter, UpstreamCountTokensOptions } from "./upstream-adapter.js";
 import type { CodexResponsesRequest, CodexSSEEvent } from "./codex-types.js";
 import { CodexApiError } from "./codex-types.js";
 import { parseSSEStream } from "./codex-sse.js";
@@ -38,9 +38,19 @@ export class AnthropicUpstream implements UpstreamAdapter {
     this.apiKey = apiKey;
   }
 
+  private buildHeaders(extraHeaders?: Record<string, string>): Record<string, string> {
+    return {
+      "x-api-key": this.apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+      ...extraHeaders,
+    };
+  }
+
   async createResponse(
     req: CodexResponsesRequest,
     signal: AbortSignal,
+    extraHeaders?: Record<string, string>,
   ): Promise<Response> {
     const modelId = extractModelId(req.model);
     const body = translateCodexToAnthropicRequest(req, modelId);
@@ -48,9 +58,7 @@ export class AnthropicUpstream implements UpstreamAdapter {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
-        "x-api-key": this.apiKey,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
+        ...this.buildHeaders(extraHeaders),
         "Accept": "text/event-stream",
       },
       body: JSON.stringify(body),
@@ -65,11 +73,38 @@ export class AnthropicUpstream implements UpstreamAdapter {
     return response;
   }
 
+  async countTokens(
+    body: Record<string, unknown>,
+    signal: AbortSignal,
+    extraHeaders?: Record<string, string>,
+    options?: UpstreamCountTokensOptions,
+  ): Promise<Record<string, unknown>> {
+    const url = options?.beta
+      ? "https://api.anthropic.com/v1/messages/count_tokens?beta=true"
+      : "https://api.anthropic.com/v1/messages/count_tokens";
+    const response = await fetch(url, {
+      method: "POST",
+      headers: this.buildHeaders(extraHeaders),
+      body: JSON.stringify(body),
+      signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => `HTTP ${response.status}`);
+      throw new CodexApiError(response.status, errorText);
+    }
+
+    return await response.json() as Record<string, unknown>;
+  }
+
   async *parseStream(response: Response): AsyncGenerator<CodexSSEEvent> {
     const fallbackId = `anthropic-${randomUUID().slice(0, 8)}`;
     let messageId = fallbackId;
     let inputTokens = 0;
     let outputTokens = 0;
+    let cachedTokens: number | undefined;
+    let stopReason: string | undefined;
+    let stopSequence: string | null = null;
 
     // Track tool_use content blocks by index → { id, name, argBuffer }
     const toolBlocks = new Map<number, { id: string; name: string; argBuffer: string }>();
@@ -163,8 +198,18 @@ export class AnthropicUpstream implements UpstreamAdapter {
 
         case "message_delta": {
           const usage = isRecord(data.usage) ? data.usage : null;
-          if (usage && typeof usage.output_tokens === "number") {
-            outputTokens = usage.output_tokens;
+          const delta = isRecord(data.delta) ? data.delta : null;
+          if (usage) {
+            if (typeof usage.output_tokens === "number") {
+              outputTokens = usage.output_tokens;
+            }
+            if (typeof usage.cache_read_input_tokens === "number") {
+              cachedTokens = usage.cache_read_input_tokens;
+            }
+          }
+          if (delta) {
+            stopReason = typeof delta.stop_reason === "string" ? delta.stop_reason : undefined;
+            stopSequence = typeof delta.stop_sequence === "string" ? delta.stop_sequence : null;
           }
           break;
         }
@@ -179,9 +224,13 @@ export class AnthropicUpstream implements UpstreamAdapter {
                 usage: {
                   input_tokens: inputTokens,
                   output_tokens: outputTokens,
-                  input_tokens_details: {},
+                  ...(cachedTokens != null
+                    ? { input_tokens_details: { cached_tokens: cachedTokens } }
+                    : { input_tokens_details: {} }),
                   output_tokens_details: {},
                 },
+                stop_reason: stopReason,
+                stop_sequence: stopSequence,
               },
             },
           };
