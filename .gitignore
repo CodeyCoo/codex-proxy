@@ -30,3 +30,8 @@ stitch-screens/
 CLAUDE.md
 *.tar.gz
 stitch-output/
+
+
+designs/
+
+.references/
