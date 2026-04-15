@@ -107,12 +107,18 @@ export function reloadFingerprint(configDir?: string): FingerprintConfig {
 
 /** Reload both config and fingerprint from disk, plus static models. */
 export function reloadAllConfigs(configDir?: string): void {
-  reloadConfig(configDir);
+  const cfg = reloadConfig(configDir);
   reloadFingerprint(configDir);
   loadStaticModels(configDir);
   console.log("[Config] Hot-reloaded config, fingerprint, and models from disk");
   // Re-merge backend models so hot-reload doesn't wipe them for ~1h
   triggerImmediateRefresh();
+  // Apply custom smart weights if present
+  if (cfg.auth.smart_weights) {
+    import("./auth/rotation-strategy.js").then(({ setSmartWeights }) => {
+      setSmartWeights(cfg.auth.smart_weights!);
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

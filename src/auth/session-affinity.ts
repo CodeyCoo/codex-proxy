@@ -70,6 +70,21 @@ export class SessionAffinityMap {
     }
   }
 
+  /**
+   * Count active sessions per account entry within a recent time window.
+   * Only sessions with activity in the last `windowMs` are counted.
+   */
+  countByEntry(windowMs: number = 30 * 60 * 1000): Map<string, number> {
+    const now = Date.now();
+    const counts = new Map<string, number>();
+    for (const entry of this.map.values()) {
+      if (now - entry.createdAt > this.ttlMs) continue; // expired
+      if (now - entry.createdAt > windowMs) continue;   // outside active window
+      counts.set(entry.entryId, (counts.get(entry.entryId) ?? 0) + 1);
+    }
+    return counts;
+  }
+
   get size(): number {
     return this.map.size;
   }

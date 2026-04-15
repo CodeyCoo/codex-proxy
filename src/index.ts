@@ -60,6 +60,12 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   const config = loadConfig();
   const fingerprint = loadFingerprint();
 
+  // Apply custom smart weights from config if present
+  if (config.auth.smart_weights) {
+    const { setSmartWeights } = await import("./auth/rotation-strategy.js");
+    setSmartWeights(config.auth.smart_weights);
+  }
+
   // Load static model catalog (before transport/auth init)
   loadStaticModels();
 

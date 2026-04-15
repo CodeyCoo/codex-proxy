@@ -57,7 +57,7 @@ function makeEntry(
 describe("rotation-strategy", () => {
   describe("least_used", () => {
     const strategy = getRotationStrategy("least_used");
-    const state: RotationState = { roundRobinIndex: 0 };
+    const state: RotationState = { roundRobinIndex: 0, lastSelectedId: null };
 
     it("prefers account with earliest window_reset_at (use-before-refresh)", () => {
       // B resets in 1 day, A resets in 7 days — should pick B even though A has fewer requests
@@ -77,6 +77,65 @@ describe("rotation-strategy", () => {
     it("falls through to request_count when both accounts have no window_reset_at", () => {
       const a = makeEntry("a", { request_count: 3 });
       const b = makeEntry("b", { request_count: 1 });
+      expect(strategy.select([a, b], state).id).toBe("b");
+    });
+
+    it("prefers fewer active sessions over all other metrics", () => {
+      // A has better used_percent but more active sessions
+      const a = makeEntry("a", { window_request_count: 5 },
+        { rate_limit: { allowed: true, limit_reached: false, used_percent: 10, reset_at: null, limit_window_seconds: null } });
+      const b = makeEntry("b", { window_request_count: 50 },
+        { rate_limit: { allowed: true, limit_reached: false, used_percent: 80, reset_at: null, limit_window_seconds: null } });
+      const sessionCounts = new Map([["a", 5], ["b", 0]]);
+      expect(strategy.select([a, b], state, sessionCounts).id).toBe("b");
+    });
+
+    it("falls through to used_percent when session counts are equal", () => {
+      const a = makeEntry("a", {},
+        { rate_limit: { allowed: true, limit_reached: false, used_percent: 60, reset_at: null, limit_window_seconds: null } });
+      const b = makeEntry("b", {},
+        { rate_limit: { allowed: true, limit_reached: false, used_percent: 20, reset_at: null, limit_window_seconds: null } });
+      const sessionCounts = new Map([["a", 2], ["b", 2]]);
+      expect(strategy.select([a, b], state, sessionCounts).id).toBe("b");
+    });
+
+    it("ignores session counts when not provided (existing conversation)", () => {
+      // Without sessionCounts, should fall through to used_percent
+      const a = makeEntry("a", {},
+        { rate_limit: { allowed: true, limit_reached: false, used_percent: 10, reset_at: null, limit_window_seconds: null } });
+      const b = makeEntry("b", {},
+        { rate_limit: { allowed: true, limit_reached: false, used_percent: 80, reset_at: null, limit_window_seconds: null } });
+      // No sessionCounts passed — should pick a (lower used_percent)
+      expect(strategy.select([a, b], state).id).toBe("a");
+    });
+
+    it("prefers lower window_request_count over lower cumulative request_count", () => {
+      // A has fewer cumulative requests but more in the current window
+      const a = makeEntry("a", { request_count: 10, window_request_count: 80 });
+      const b = makeEntry("b", { request_count: 200, window_request_count: 5 });
+      expect(strategy.select([a, b], state).id).toBe("b");
+    });
+
+    it("prefers lower used_percent even with more window requests (sync-exhaust)", () => {
+      // A has fewer window requests but higher used_percent (small quota)
+      const a = makeEntry("a", { window_request_count: 10 },
+        { rate_limit: { allowed: true, limit_reached: false, used_percent: 60, reset_at: null, limit_window_seconds: null } });
+      const b = makeEntry("b", { window_request_count: 50 },
+        { rate_limit: { allowed: true, limit_reached: false, used_percent: 15, reset_at: null, limit_window_seconds: null } });
+      expect(strategy.select([a, b], state).id).toBe("b");
+    });
+
+    it("does not penalize accounts without quota data", () => {
+      const noQuota = makeEntry("a", { window_request_count: 5 }); // no cachedQuota
+      const withQuota = makeEntry("b", { window_request_count: 5 },
+        { rate_limit: { allowed: true, limit_reached: false, used_percent: 30, reset_at: null, limit_window_seconds: null } });
+      // a has no quota → used_percent defaults to 0, so it should win over b with used_percent=30
+      expect(strategy.select([noQuota, withQuota], state).id).toBe("a");
+    });
+
+    it("falls back to request_count when window_request_count is unavailable", () => {
+      const a = makeEntry("a", { request_count: 50 }); // no window data
+      const b = makeEntry("b", { request_count: 10 }); // no window data
       expect(strategy.select([a, b], state).id).toBe("b");
     });
 
@@ -136,12 +195,13 @@ describe("rotation-strategy", () => {
   describe("round_robin", () => {
     const strategy = getRotationStrategy("round_robin");
 
-    it("cycles through candidates in order", () => {
-      const state: RotationState = { roundRobinIndex: 0 };
+    it("cycles through candidates in sorted ID order", () => {
+      const state: RotationState = { roundRobinIndex: 0, lastSelectedId: null };
       const a = makeEntry("a");
       const b = makeEntry("b");
       const c = makeEntry("c");
-      const candidates = [a, b, c];
+      // Pass in unsorted order to verify sorting
+      const candidates = [c, a, b];
 
       expect(strategy.select(candidates, state).id).toBe("a");
       expect(strategy.select(candidates, state).id).toBe("b");
@@ -149,32 +209,42 @@ describe("rotation-strategy", () => {
       expect(strategy.select(candidates, state).id).toBe("a"); // wraps
     });
 
-    it("wraps index when candidates shrink", () => {
-      const state: RotationState = { roundRobinIndex: 5 };
+    it("skips to next when last selected is removed from pool", () => {
+      const state: RotationState = { roundRobinIndex: 0, lastSelectedId: null };
       const a = makeEntry("a");
       const b = makeEntry("b");
-      // 5 % 2 = 1 → picks b
-      expect(strategy.select([a, b], state).id).toBe("b");
+      const c = makeEntry("c");
+
+      expect(strategy.select([a, b, c], state).id).toBe("a");
+      expect(strategy.select([a, b, c], state).id).toBe("b");
+      // B is removed — should pick C (next after B), not A
+      expect(strategy.select([a, c], state).id).toBe("c");
+      expect(strategy.select([a, c], state).id).toBe("a"); // wraps
+    });
+
+    it("wraps around when last selected was the final entry", () => {
+      const state: RotationState = { roundRobinIndex: 0, lastSelectedId: "c" };
+      const a = makeEntry("a");
+      const b = makeEntry("b");
+      // last was "c", no ID > "c" → wraps to "a"
+      expect(strategy.select([a, b], state).id).toBe("a");
     });
   });
 
-  describe("sticky", () => {
+  describe("sticky (delegates to least_used)", () => {
     const strategy = getRotationStrategy("sticky");
-    const state: RotationState = { roundRobinIndex: 0 };
+    const state: RotationState = { roundRobinIndex: 0, lastSelectedId: null };
 
-    it("selects most recently used account", () => {
-      const a = makeEntry("a", { last_used: "2026-01-01T00:00:00Z" });
-      const b = makeEntry("b", { last_used: "2026-01-03T00:00:00Z" });
-      const c = makeEntry("c", { last_used: "2026-01-02T00:00:00Z" });
-      expect(strategy.select([a, b, c], state).id).toBe("b");
+    it("behaves like least_used — prefers fewer window requests", () => {
+      const a = makeEntry("a", { request_count: 10, window_request_count: 50 });
+      const b = makeEntry("b", { request_count: 100, window_request_count: 5 });
+      expect(strategy.select([a, b], state).id).toBe("b");
     });
 
-    it("selects any when none have been used", () => {
-      const a = makeEntry("a");
-      const b = makeEntry("b");
-      // Both have last_used=null → both map to 0 → stable sort keeps first
-      const result = strategy.select([a, b], state);
-      expect(["a", "b"]).toContain(result.id);
+    it("behaves like least_used — LRU as tiebreaker", () => {
+      const a = makeEntry("a", { last_used: "2026-01-03T00:00:00Z" });
+      const b = makeEntry("b", { last_used: "2026-01-01T00:00:00Z" });
+      expect(strategy.select([a, b], state).id).toBe("b");
     });
   });
 
@@ -188,7 +258,7 @@ describe("rotation-strategy", () => {
 
   it("select does not mutate the input candidates array", () => {
     const strategy = getRotationStrategy("least_used");
-    const state: RotationState = { roundRobinIndex: 0 };
+    const state: RotationState = { roundRobinIndex: 0, lastSelectedId: null };
     const a = makeEntry("a", { request_count: 5 });
     const b = makeEntry("b", { request_count: 2 });
     const c = makeEntry("c", { request_count: 8 });

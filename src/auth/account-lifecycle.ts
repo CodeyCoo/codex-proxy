@@ -11,6 +11,7 @@ import { getRotationStrategy } from "./rotation-strategy.js";
 import type { RotationStrategy, RotationState, RotationStrategyName } from "./rotation-strategy.js";
 import type { AccountRegistry } from "./account-registry.js";
 import type { AccountEntry, AcquiredAccount } from "./types.js";
+import { getSessionAffinityMap } from "./session-affinity.js";
 
 const ACQUIRE_LOCK_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -18,7 +19,7 @@ export class AccountLifecycle {
   /** Per-account active slot timestamps. Each entry = one in-flight request. */
   private acquireLocks: Map<string, number[]> = new Map();
   private strategy: RotationStrategy;
-  private rotationState: RotationState = { roundRobinIndex: 0 };
+  private rotationState: RotationState = { roundRobinIndex: 0, lastSelectedId: null };
   private registry: AccountRegistry;
 
   constructor(registry: AccountRegistry, strategyName: RotationStrategyName) {
@@ -106,7 +107,9 @@ export class AccountLifecycle {
       const preferred = candidates.find((a) => a.id === options.preferredEntryId);
       selected = preferred ?? this.strategy.select(candidates, this.rotationState);
     } else {
-      selected = this.strategy.select(candidates, this.rotationState);
+      // New conversation — pass active session counts so strategy can spread load
+      const sessionCounts = getSessionAffinityMap().countByEntry();
+      selected = this.strategy.select(candidates, this.rotationState, sessionCounts);
     }
     const prevSlots = this.acquireLocks.get(selected.id);
     const prevSlotMs = prevSlots?.[prevSlots.length - 1] ?? null;
@@ -143,6 +146,7 @@ export class AccountLifecycle {
   setRotationStrategy(name: RotationStrategyName): void {
     this.strategy = getRotationStrategy(name);
     this.rotationState.roundRobinIndex = 0;
+    this.rotationState.lastSelectedId = null;
   }
 
   getDistinctPlanAccounts(): Array<{
@@ -173,9 +177,10 @@ export class AccountLifecycle {
       group.push(a);
     }
 
+    const sessionCounts = getSessionAffinityMap().countByEntry();
     const result: Array<{ planType: string; entryId: string; token: string; accountId: string | null }> = [];
     for (const [plan, group] of byPlan) {
-      const selected = this.strategy.select(group, this.rotationState);
+      const selected = this.strategy.select(group, this.rotationState, sessionCounts);
       this.pushSlot(selected.id);
       result.push({
         planType: plan,

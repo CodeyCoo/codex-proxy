@@ -1,6 +1,28 @@
 import { z } from "zod";
 
-export const ROTATION_STRATEGIES = ["least_used", "round_robin", "sticky"] as const;
+export const ROTATION_STRATEGIES = [
+  "smart",
+  "least_used",
+  "round_robin",
+  "sticky",
+  "by_sessions",
+  "by_exhausted",
+  "by_used_percent",
+  "by_reset_time",
+  "by_window_requests",
+  "by_request_count",
+  "by_lru",
+] as const;
+
+export const SmartWeightsSchema = z.object({
+  sessions: z.number().min(0).default(30),
+  exhausted: z.number().min(0).default(25),
+  used_percent: z.number().min(0).default(20),
+  reset_time: z.number().min(0).default(5),
+  window_requests: z.number().min(0).default(10),
+  request_count: z.number().min(0).default(2),
+  lru: z.number().min(0).default(8),
+});
 
 export const ConfigSchema = z.object({
   api: z.object({
@@ -30,7 +52,8 @@ export const ConfigSchema = z.object({
     refresh_concurrency: z.number().int().min(1).default(2),
     max_concurrent_per_account: z.number().int().min(1).nullable().default(3),
     request_interval_ms: z.number().int().min(0).nullable().default(50),
-    rotation_strategy: z.enum(ROTATION_STRATEGIES).default("least_used"),
+    rotation_strategy: z.enum(ROTATION_STRATEGIES).default("smart"),
+    smart_weights: SmartWeightsSchema.optional(),
     rate_limit_backoff_seconds: z.number().min(1).default(60),
     oauth_client_id: z.string().default("app_EMoamEEZ73f0CkXaXp7hrann"),
     oauth_auth_endpoint: z.string().default("https://auth.openai.com/oauth/authorize"),

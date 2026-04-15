@@ -11,7 +11,11 @@ import {
 
 describe("ROTATION_STRATEGIES", () => {
   it("contains expected values", () => {
-    expect(ROTATION_STRATEGIES).toEqual(["least_used", "round_robin", "sticky"]);
+    expect(ROTATION_STRATEGIES).toEqual([
+      "smart", "least_used", "round_robin", "sticky",
+      "by_sessions", "by_exhausted", "by_used_percent", "by_reset_time",
+      "by_window_requests", "by_request_count", "by_lru",
+    ]);
   });
 });
 
@@ -32,7 +36,7 @@ describe("ConfigSchema", () => {
     expect(result.server.port).toBe(8080);
     expect(result.server.host).toBe("0.0.0.0");
     expect(result.server.proxy_api_key).toBeNull();
-    expect(result.auth.rotation_strategy).toBe("least_used");
+    expect(result.auth.rotation_strategy).toBe("smart");
     expect(result.auth.refresh_concurrency).toBe(2);
     expect(result.auth.max_concurrent_per_account).toBe(3);
     expect(result.auth.request_interval_ms).toBe(50);
