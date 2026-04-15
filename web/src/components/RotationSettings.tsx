@@ -1,43 +1,76 @@
 import { useState, useCallback } from "preact/hooks";
 import { useT } from "../../../shared/i18n/context";
-import { useRotationSettings, type RotationStrategy } from "../../../shared/hooks/use-rotation-settings";
+import { useRotationSettings, type RotationStrategy, type SmartWeights } from "../../../shared/hooks/use-rotation-settings";
 import { useSettings } from "../../../shared/hooks/use-settings";
 
-type Mode = "sticky" | "rotation";
-type RotationSub = "least_used" | "round_robin";
+const STRATEGY_OPTIONS: RotationStrategy[] = [
+  "smart",
+  "round_robin",
+  "by_sessions",
+  "by_exhausted",
+  "by_used_percent",
+  "by_reset_time",
+  "by_window_requests",
+  "by_request_count",
+  "by_lru",
+];
 
-function toMode(strategy: RotationStrategy): Mode {
-  return strategy === "sticky" ? "sticky" : "rotation";
-}
+const DEFAULT_WEIGHTS: SmartWeights = {
+  sessions: 30,
+  exhausted: 25,
+  used_percent: 20,
+  reset_time: 5,
+  window_requests: 10,
+  request_count: 2,
+  lru: 8,
+};
 
-function toStrategy(mode: Mode, sub: RotationSub): RotationStrategy {
-  return mode === "sticky" ? "sticky" : sub;
-}
+const WEIGHT_KEYS: Array<keyof SmartWeights> = [
+  "sessions", "exhausted", "used_percent", "reset_time",
+  "window_requests", "request_count", "lru",
+];
 
 export function RotationSettings() {
   const t = useT();
   const settings = useSettings();
   const rs = useRotationSettings(settings.apiKey);
 
-  const current = rs.data?.rotation_strategy ?? "least_used";
-  const currentMode = toMode(current);
-  const currentSub: RotationSub = current === "sticky" ? "least_used" : (current as RotationSub);
+  const currentStrategy = rs.data?.rotation_strategy ?? "smart";
+  const currentWeights = rs.data?.smart_weights ?? DEFAULT_WEIGHTS;
 
-  const [draftMode, setDraftMode] = useState<Mode | null>(null);
-  const [draftSub, setDraftSub] = useState<RotationSub | null>(null);
+  const [draftStrategy, setDraftStrategy] = useState<RotationStrategy | null>(null);
+  const [draftWeights, setDraftWeights] = useState<SmartWeights | null>(null);
   const [collapsed, setCollapsed] = useState(true);
 
-  const displayMode = draftMode ?? currentMode;
-  const displaySub = draftSub ?? currentSub;
-  const displayStrategy = toStrategy(displayMode, displaySub);
-  const isDirty = displayStrategy !== current;
+  const displayStrategy = draftStrategy ?? currentStrategy;
+  // Normalize legacy values to "smart"
+  const effectiveStrategy = (displayStrategy === "least_used" || displayStrategy === "sticky")
+    ? "smart" : displayStrategy;
+  const displayWeights = draftWeights ?? currentWeights;
+  const isSmartSelected = effectiveStrategy === "smart";
+
+  const isDirty =
+    effectiveStrategy !== (currentStrategy === "least_used" || currentStrategy === "sticky" ? "smart" : currentStrategy) ||
+    (isSmartSelected && JSON.stringify(displayWeights) !== JSON.stringify(currentWeights));
 
   const handleSave = useCallback(async () => {
     if (!isDirty) return;
-    await rs.save({ rotation_strategy: displayStrategy });
-    setDraftMode(null);
-    setDraftSub(null);
-  }, [isDirty, displayStrategy, rs]);
+    await rs.save({
+      rotation_strategy: effectiveStrategy,
+      ...(isSmartSelected ? { smart_weights: displayWeights } : {}),
+    });
+    setDraftStrategy(null);
+    setDraftWeights(null);
+  }, [isDirty, effectiveStrategy, displayWeights, isSmartSelected, rs]);
+
+  const handleWeightChange = useCallback((key: keyof SmartWeights, value: number) => {
+    const base = draftWeights ?? currentWeights;
+    setDraftWeights({ ...base, [key]: value });
+  }, [draftWeights, currentWeights]);
+
+  const handleResetWeights = useCallback(() => {
+    setDraftWeights({ ...DEFAULT_WEIGHTS });
+  }, []);
 
   const radioCls = "w-4 h-4 text-primary focus:ring-primary cursor-pointer";
   const labelCls = "text-[0.8rem] font-medium text-slate-700 dark:text-text-main cursor-pointer";
@@ -63,72 +96,54 @@ export function RotationSettings() {
         <div class="px-5 pb-5 border-t border-slate-100 dark:border-border-dark pt-4 space-y-4">
           <p class="text-xs text-slate-400 dark:text-text-dim">{t("rotationStrategyHint")}</p>
 
-          {/* Mode: Sticky vs Rotation */}
-          <div class="space-y-3">
-            {/* Sticky */}
-            <label class="flex items-start gap-3 p-3 rounded-lg border border-gray-200 dark:border-border-dark cursor-pointer hover:bg-slate-50 dark:hover:bg-bg-dark transition-colors">
-              <input
-                type="radio"
-                name="rotation-mode"
-                checked={displayMode === "sticky"}
-                onChange={() => setDraftMode("sticky")}
-                class={radioCls + " mt-0.5"}
-              />
-              <div>
-                <span class={labelCls}>{t("rotationSticky")}</span>
-                <p class="text-xs text-slate-400 dark:text-text-dim mt-0.5">{t("rotationStickyDesc")}</p>
-              </div>
-            </label>
-
-            {/* Rotation */}
-            <label class="flex items-start gap-3 p-3 rounded-lg border border-gray-200 dark:border-border-dark cursor-pointer hover:bg-slate-50 dark:hover:bg-bg-dark transition-colors">
-              <input
-                type="radio"
-                name="rotation-mode"
-                checked={displayMode === "rotation"}
-                onChange={() => setDraftMode("rotation")}
-                class={radioCls + " mt-0.5"}
-              />
-              <div class="flex-1">
-                <span class={labelCls}>{t("rotationRotate")}</span>
-                <p class="text-xs text-slate-400 dark:text-text-dim mt-0.5">{t("rotationRotateDesc")}</p>
-              </div>
-            </label>
-
-            {/* Sub-strategy (only when rotation mode) */}
-            {displayMode === "rotation" && (
-              <div class="ml-10 space-y-2">
-                <label class="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="radio"
-                    name="rotation-sub"
-                    checked={displaySub === "least_used"}
-                    onChange={() => setDraftSub("least_used")}
-                    class={radioCls}
-                  />
-                  <div>
-                    <span class="text-xs font-medium text-slate-600 dark:text-text-main">{t("rotationLeastUsed")}</span>
-                    <span class="text-xs text-slate-400 dark:text-text-dim ml-1.5">{t("rotationLeastUsedDesc")}</span>
-                  </div>
-                </label>
-                <label class="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="radio"
-                    name="rotation-sub"
-                    checked={displaySub === "round_robin"}
-                    onChange={() => setDraftSub("round_robin")}
-                    class={radioCls}
-                  />
-                  <div>
-                    <span class="text-xs font-medium text-slate-600 dark:text-text-main">{t("rotationRoundRobin")}</span>
-                    <span class="text-xs text-slate-400 dark:text-text-dim ml-1.5">{t("rotationRoundRobinDesc")}</span>
-                  </div>
-                </label>
-              </div>
-            )}
+          <div class="space-y-2">
+            {STRATEGY_OPTIONS.map((strat) => (
+              <label key={strat} class="flex items-center gap-3 p-2.5 rounded-lg border border-gray-200 dark:border-border-dark cursor-pointer hover:bg-slate-50 dark:hover:bg-bg-dark transition-colors">
+                <input
+                  type="radio"
+                  name="rotation-strategy"
+                  checked={effectiveStrategy === strat}
+                  onChange={() => setDraftStrategy(strat)}
+                  class={radioCls}
+                />
+                <div>
+                  <span class={labelCls}>{t(`rotation_${strat}` as any)}</span>
+                  <span class="text-xs text-slate-400 dark:text-text-dim ml-1.5">{t(`rotation_${strat}_desc` as any)}</span>
+                </div>
+              </label>
+            ))}
           </div>
 
-          {/* Save button + status */}
+          {/* Smart weights editor */}
+          {isSmartSelected && (
+            <div class="mt-3 p-3 rounded-lg border border-gray-200 dark:border-border-dark space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-semibold text-slate-600 dark:text-text-main">{t("rotationSmartWeights")}</span>
+                <button
+                  onClick={handleResetWeights}
+                  class="text-xs text-primary hover:underline cursor-pointer"
+                >
+                  {t("rotationResetWeights")}
+                </button>
+              </div>
+              {WEIGHT_KEYS.map((key) => (
+                <div key={key} class="flex items-center gap-3">
+                  <span class="text-xs text-slate-500 dark:text-text-dim w-32 shrink-0">{t(`rotation_weight_${key}` as any)}</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={displayWeights[key]}
+                    onInput={(e) => handleWeightChange(key, Number((e.target as HTMLInputElement).value))}
+                    class="flex-1 h-1.5 accent-primary cursor-pointer"
+                  />
+                  <span class="text-xs text-slate-500 dark:text-text-dim w-8 text-right">{displayWeights[key]}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Save button */}
           <div class="flex items-center gap-3">
             <button
               onClick={handleSave}

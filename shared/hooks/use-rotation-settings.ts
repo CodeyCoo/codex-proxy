@@ -1,10 +1,32 @@
 import { useState, useEffect, useCallback } from "preact/hooks";
 import { extractErrorMessage } from "../utils/extract-error";
 
-export type RotationStrategy = "least_used" | "round_robin" | "sticky";
+export type RotationStrategy =
+  | "smart"
+  | "least_used"
+  | "round_robin"
+  | "sticky"
+  | "by_sessions"
+  | "by_exhausted"
+  | "by_used_percent"
+  | "by_reset_time"
+  | "by_window_requests"
+  | "by_request_count"
+  | "by_lru";
+
+export interface SmartWeights {
+  sessions: number;
+  exhausted: number;
+  used_percent: number;
+  reset_time: number;
+  window_requests: number;
+  request_count: number;
+  lru: number;
+}
 
 export interface RotationSettingsData {
   rotation_strategy: RotationStrategy;
+  smart_weights?: SmartWeights;
 }
 
 export function useRotationSettings(apiKey: string | null) {
