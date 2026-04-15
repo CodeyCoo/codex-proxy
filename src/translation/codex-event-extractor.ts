@@ -70,6 +70,10 @@ export async function* iterateCodexEvents(
   const itemIdToCallInfo = new Map<string, { callId: string; name: string }>();
 
   for await (const raw of api.parseStream(rawResponse)) {
+    if (raw.event === "keepalive") {
+      continue;
+    }
+
     const typed = parseCodexEvent(raw);
     const extracted: ExtractedEvent = { typed };
 
@@ -82,6 +86,7 @@ export async function* iterateCodexEvents(
       case "response.created":
       case "response.in_progress":
         if (typed.response.id) extracted.responseId = typed.response.id;
+        if (typed.response.usage) extracted.usage = typed.response.usage;
         break;
 
       case "response.output_text.delta":

@@ -638,7 +638,9 @@ describe("translateAnthropicToCodexRequest", () => {
         (i) => "role" in i && i.role === "assistant",
       );
       expect(assistantItem).toBeDefined();
-      expect((assistantItem as Record<string, unknown>).content).toBe("visible answer");
+      expect((assistantItem as Record<string, unknown>).content).toBe(
+        "[Anthropic compatibility note] thinking block was downgraded to text.\nvisible answer",
+      );
     });
 
     it("filters out redacted_thinking blocks from assistant content", () => {
@@ -659,7 +661,9 @@ describe("translateAnthropicToCodexRequest", () => {
         (i) => "role" in i && i.role === "assistant",
       );
       expect(assistantItem).toBeDefined();
-      expect((assistantItem as Record<string, unknown>).content).toBe("answer");
+      expect((assistantItem as Record<string, unknown>).content).toBe(
+        "[Anthropic compatibility note] redacted_thinking block was downgraded to text.\nanswer",
+      );
     });
   });
 
