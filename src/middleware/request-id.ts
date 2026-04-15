@@ -9,5 +9,6 @@ export async function requestId(c: Context, next: Next): Promise<void> {
   const id = c.req.header("x-request-id") ?? randomUUID().slice(0, 8);
   c.set("requestId", id);
   c.header("X-Request-Id", id);
+  c.header("request-id", id);
   await next();
 }
