@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockConfig = {
   server: { proxy_api_key: null as string | null },
-  auth: { rotation_strategy: "least_used" as string },
+  auth: { rotation_strategy: "smart" as string, smart_weights: undefined as Record<string, number> | undefined },
   quota: {
     refresh_interval_minutes: 5,
     warning_thresholds: { primary: [80, 90], secondary: [80, 90] },
@@ -22,7 +22,7 @@ vi.mock("../../config.js", () => ({
   getConfig: vi.fn(() => mockConfig),
   reloadAllConfigs: vi.fn(),
   getLocalConfigPath: vi.fn(() => "/tmp/test/local.yaml"),
-  ROTATION_STRATEGIES: ["least_used", "round_robin", "sticky"],
+  ROTATION_STRATEGIES: ["smart", "least_used", "round_robin", "sticky", "by_sessions", "by_exhausted", "by_used_percent", "by_reset_time", "by_window_requests", "by_request_count", "by_lru"],
 }));
 
 vi.mock("../../paths.js", () => ({
@@ -71,6 +71,14 @@ vi.mock("@hono/node-server/conninfo", () => ({
   getConnInfo: vi.fn(() => ({ remote: { address: "127.0.0.1" } })),
 }));
 
+vi.mock("../../auth/rotation-strategy.js", () => ({
+  setSmartWeights: vi.fn(),
+  DEFAULT_SMART_WEIGHTS: {
+    sessions: 30, exhausted: 25, used_percent: 20,
+    reset_time: 5, window_requests: 10, request_count: 2, lru: 8,
+  },
+}));
+
 import { createWebRoutes } from "../web.js";
 import { mutateYaml } from "../../utils/yaml-mutate.js";
 
@@ -83,23 +91,26 @@ const mockPool = {
 describe("GET /admin/rotation-settings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockConfig.auth.rotation_strategy = "least_used";
+    mockConfig.auth.rotation_strategy = "smart";
+    mockConfig.auth.smart_weights = undefined;
   });
 
-  it("returns current rotation strategy", async () => {
+  it("returns current rotation strategy with default weights", async () => {
     const app = createWebRoutes(mockPool);
     const res = await app.request("/admin/rotation-settings");
     expect(res.status).toBe(200);
     const data = await res.json();
-    expect(data).toEqual({ rotation_strategy: "least_used" });
+    expect(data.rotation_strategy).toBe("smart");
+    expect(data.smart_weights).toBeDefined();
+    expect(data.smart_weights.sessions).toBe(30);
   });
 
   it("reflects config value", async () => {
-    mockConfig.auth.rotation_strategy = "sticky";
+    mockConfig.auth.rotation_strategy = "round_robin";
     const app = createWebRoutes(mockPool);
     const res = await app.request("/admin/rotation-settings");
     const data = await res.json();
-    expect(data.rotation_strategy).toBe("sticky");
+    expect(data.rotation_strategy).toBe("round_robin");
   });
 });
 
@@ -107,15 +118,16 @@ describe("POST /admin/rotation-settings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockConfig.server.proxy_api_key = null;
-    mockConfig.auth.rotation_strategy = "least_used";
+    mockConfig.auth.rotation_strategy = "smart";
+    mockConfig.auth.smart_weights = undefined;
   });
 
-  it("updates strategy to sticky", async () => {
+  it("updates strategy to round_robin", async () => {
     const app = createWebRoutes(mockPool);
     const res = await app.request("/admin/rotation-settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rotation_strategy: "sticky" }),
+      body: JSON.stringify({ rotation_strategy: "round_robin" }),
     });
     expect(res.status).toBe(200);
     const data = await res.json();
@@ -123,9 +135,9 @@ describe("POST /admin/rotation-settings", () => {
     expect(mutateYaml).toHaveBeenCalledOnce();
   });
 
-  it("accepts all three valid strategies", async () => {
+  it("accepts all valid strategies", async () => {
     const app = createWebRoutes(mockPool);
-    for (const strategy of ["least_used", "round_robin", "sticky"]) {
+    for (const strategy of ["smart", "round_robin", "by_sessions", "by_used_percent", "by_lru"]) {
       vi.mocked(mutateYaml).mockClear();
       const res = await app.request("/admin/rotation-settings", {
         method: "POST",
@@ -166,7 +178,7 @@ describe("POST /admin/rotation-settings", () => {
     const res1 = await app.request("/admin/rotation-settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rotation_strategy: "sticky" }),
+      body: JSON.stringify({ rotation_strategy: "smart" }),
     });
     expect(res1.status).toBe(401);
 
@@ -177,7 +189,7 @@ describe("POST /admin/rotation-settings", () => {
         "Content-Type": "application/json",
         Authorization: "Bearer my-secret",
       },
-      body: JSON.stringify({ rotation_strategy: "sticky" }),
+      body: JSON.stringify({ rotation_strategy: "smart" }),
     });
     expect(res2.status).toBe(200);
   });

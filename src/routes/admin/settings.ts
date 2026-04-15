@@ -3,6 +3,8 @@ import { getConnInfo } from "@hono/node-server/conninfo";
 import { getConfig, getLocalConfigPath, reloadAllConfigs, ROTATION_STRATEGIES } from "../../config.js";
 import { mutateYaml } from "../../utils/yaml-mutate.js";
 import { isLocalhostRequest } from "../../utils/is-localhost.js";
+import { setSmartWeights, DEFAULT_SMART_WEIGHTS } from "../../auth/rotation-strategy.js";
+import type { SmartWeights } from "../../auth/rotation-strategy.js";
 
 export function createSettingsRoutes(): Hono {
   const app = new Hono();
@@ -13,6 +15,7 @@ export function createSettingsRoutes(): Hono {
     const config = getConfig();
     return c.json({
       rotation_strategy: config.auth.rotation_strategy,
+      smart_weights: config.auth.smart_weights ?? DEFAULT_SMART_WEIGHTS,
     });
   });
 
@@ -29,23 +32,42 @@ export function createSettingsRoutes(): Hono {
       }
     }
 
-    const body = await c.req.json() as { rotation_strategy?: string };
+    const body = await c.req.json() as { rotation_strategy?: string; smart_weights?: SmartWeights };
     const valid: readonly string[] = ROTATION_STRATEGIES;
     if (!body.rotation_strategy || !valid.includes(body.rotation_strategy)) {
       c.status(400);
       return c.json({ error: `rotation_strategy must be one of: ${ROTATION_STRATEGIES.join(", ")}` });
     }
 
+    // Validate smart_weights if provided
+    if (body.smart_weights) {
+      const keys: Array<keyof SmartWeights> = ["sessions", "exhausted", "used_percent", "reset_time", "window_requests", "request_count", "lru"];
+      for (const key of keys) {
+        const v = body.smart_weights[key];
+        if (typeof v !== "number" || v < 0 || v > 100) {
+          c.status(400);
+          return c.json({ error: `smart_weights.${key} must be a number between 0 and 100` });
+        }
+      }
+    }
+
     mutateYaml(getLocalConfigPath(), (data) => {
       if (!data.auth) data.auth = {};
       (data.auth as Record<string, unknown>).rotation_strategy = body.rotation_strategy;
+      if (body.smart_weights) {
+        (data.auth as Record<string, unknown>).smart_weights = body.smart_weights;
+      }
     });
     reloadAllConfigs();
 
+    // Apply weights at runtime
     const updated = getConfig();
+    setSmartWeights(updated.auth.smart_weights ?? DEFAULT_SMART_WEIGHTS);
+
     return c.json({
       success: true,
       rotation_strategy: updated.auth.rotation_strategy,
+      smart_weights: updated.auth.smart_weights ?? DEFAULT_SMART_WEIGHTS,
     });
   });
 
