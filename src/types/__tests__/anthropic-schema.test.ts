@@ -550,13 +550,13 @@ describe("Anthropic compatibility debug logging", () => {
       ],
     } as any);
 
+    // thinking / redacted_thinking are silently dropped (no compat note) —
+    // reasoning is never forwarded to Codex.
     expect(translated.input).toEqual([
       {
         role: "user",
         content: [
           "hi",
-          "[Anthropic compatibility note] thinking block with signature was downgraded to text.",
-          "[Anthropic compatibility note] redacted_thinking block was downgraded to text.",
           "[Anthropic compatibility note] tool_reference block for tool \"Read\" was downgraded to text.",
           "[Anthropic compatibility note] container_upload block for file \"file_123\" was downgraded to text.",
           "[Anthropic compatibility note] server_tool_use block for tool \"web_search\" was downgraded to text.",
@@ -589,14 +589,13 @@ describe("Anthropic compatibility debug logging", () => {
       ],
     } as any);
 
+    // thinking / redacted_thinking are silently dropped — no compat note.
     expect(translated.input).toEqual([
       {
         type: "function_call_output",
         call_id: "tool_1",
         output: [
           "done",
-          "[Anthropic compatibility note] thinking block with signature was downgraded to text.",
-          "[Anthropic compatibility note] redacted_thinking block was downgraded to text.",
           "[Anthropic compatibility note] tool_reference block for tool \"Read\" was downgraded to text.",
           "[Anthropic compatibility note] container_upload block for file \"file_123\" was downgraded to text.",
           "[Anthropic compatibility note] server_tool_use block for tool \"web_search\" was downgraded to text.",
@@ -622,13 +621,12 @@ describe("Anthropic compatibility debug logging", () => {
         ],
       } as any);
 
+      // thinking / redacted_thinking are silently dropped — no compat note.
       expect(translated.input).toEqual([
         {
           role: "assistant",
           content: [
             "checking",
-            "[Anthropic compatibility note] thinking block with signature was downgraded to text.",
-            "[Anthropic compatibility note] redacted_thinking block was downgraded to text.",
             "[Anthropic compatibility note] server_tool_use block for tool \"web_search\" was downgraded to text.",
           ].join("\n"),
         },
@@ -795,6 +793,59 @@ describe("Anthropic compatibility debug logging", () => {
     });
   });
 
+  it("never emits thinking blocks in the SSE stream, even when Codex sends reasoning deltas", async () => {
+    // Rationale: the proxy cannot produce a valid Anthropic
+    // `thinking.signature`. If it emitted an unsigned thinking block, the
+    // client would append it to local history, and the next turn sent to
+    // official Claude would fail with `Invalid signature in thinking block`.
+    const adapter = makeMockAdapter([
+      makeCreatedEvent("resp_stream_1"),
+      makeReasoningDeltaEvent("Reasoning step 1"),
+      makeReasoningDeltaEvent("Reasoning step 2"),
+      makeTextDeltaEvent("final answer"),
+      makeCompletedEvent("resp_stream_1", 3, 5, 1),
+    ]);
+
+    const chunks = await collectStreamChunks(
+      streamCodexToAnthropic(adapter, new Response(), "claude-opus-4-5", undefined, undefined, true),
+    );
+    const joined = chunks.join("");
+    // No thinking content block, no reasoning leakage
+    expect(joined).not.toContain('"type":"thinking"');
+    expect(joined).not.toContain("Reasoning step");
+    // Text answer still reaches the client
+    expect(joined).toContain('"type":"text"');
+    expect(joined).toContain("final answer");
+  });
+
+  it("drops thinking blocks silently from inbound Anthropic messages (no compat note to Codex)", () => {
+    // Rationale: reasoning should not flow through the message history to
+    // Codex. Cross-model reasoning transplant has uncertain benefit and real
+    // risk (style drift, token bloat). The client's local history still
+    // holds the signed originals intact.
+    const translated = translateAnthropicToCodexRequest({
+      ...BASE_REQUEST,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "long internal reasoning", signature: "sig_real_abc" },
+            { type: "text", text: "The answer is 42." },
+          ],
+        },
+      ],
+    } as any);
+
+    expect(translated.input).toEqual([
+      { role: "assistant", content: "The answer is 42." },
+    ]);
+    // No trace of reasoning or compat note reaches Codex
+    const serialized = JSON.stringify(translated);
+    expect(serialized).not.toContain("long internal reasoning");
+    expect(serialized).not.toContain("thinking block");
+    expect(serialized).not.toContain("sig_real_abc");
+  });
+
   it("logs collected response summaries with content block types", async () => {
     const adapter = makeMockAdapter([
       makeCreatedEvent("resp_2"),
@@ -810,12 +861,14 @@ describe("Anthropic compatibility debug logging", () => {
       true,
     ));
 
-    expect(result.response.content.map((block) => block.type)).toEqual(["thinking", "text"]);
+    // Proxy never emits `thinking` blocks — it can't produce a valid
+    // Anthropic signature. Codex reasoning is dropped; only text is returned.
+    expect(result.response.content.map((block) => block.type)).toEqual(["text"]);
     expect(findDebugMessage("[AnthropicCompat] Collected response summary")).toEqual({
       model: "claude-opus-4-5",
       wantThinking: true,
       hasToolUse: false,
-      contentTypes: ["thinking", "text"],
+      contentTypes: ["text"],
       usage: { input_tokens: 9, output_tokens: 4, cached_tokens: 2 },
     });
   });

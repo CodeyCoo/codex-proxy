@@ -620,9 +620,11 @@ describe("upstream direct routing without Codex auth", () => {
 
     const sse = await res.text();
     expect(sse).toContain('"type":"message_start"');
-    expect(sse).toContain('"type":"content_block_start","index":0,"content_block":{"type":"thinking"');
-    expect(sse).toContain('"thinking":"Need to inspect the file first."');
-    expect(sse).toContain('"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_child_2","name":"Read","input":{}}');
+    // Proxy never emits thinking blocks — Codex reasoning is dropped to avoid
+    // poisoning client history with unsigned thinking.
+    expect(sse).not.toContain('"type":"thinking"');
+    expect(sse).not.toContain('"thinking":"Need to inspect the file first."');
+    expect(sse).toContain('"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_child_2","name":"Read","input":{}}');
     expect(sse).toContain('"type":"input_json_delta","partial_json":"{\\"file_path\\":\\"/tmp/demo.txt\\"}"');
     expect(sse).toContain('"stop_reason":"tool_use"');
     expect(sse).toContain('"stop_sequence":"END_TOOL"');

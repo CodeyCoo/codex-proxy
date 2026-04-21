@@ -163,14 +163,17 @@ function mapThinkingToEffort(
  */
 function makeUnsupportedBlockNote(block: Record<string, unknown>): string | null {
   switch (block.type) {
-    case "thinking": {
-      const hasSignature = typeof block.signature === "string" && block.signature.length > 0;
-      return hasSignature
-        ? "[Anthropic compatibility note] thinking block with signature was downgraded to text."
-        : "[Anthropic compatibility note] thinking block was downgraded to text.";
-    }
+    // thinking / redacted_thinking: the proxy cannot forward reasoning to
+    // Codex. Any cross-model reasoning transplant has uncertain benefit and
+    // real risk (style drift, token bloat), and the proxy cannot produce a
+    // valid `thinking.signature` either. So thinking blocks are silently
+    // dropped on the inbound side — no compat note, no token waste, Codex
+    // simply doesn't see them. Client history (which is authoritative) is
+    // untouched; any signed thinking blocks there remain intact for when the
+    // conversation is sent back to official Claude.
+    case "thinking":
     case "redacted_thinking": {
-      return "[Anthropic compatibility note] redacted_thinking block was downgraded to text.";
+      return null;
     }
     case "tool_reference": {
       const toolName = typeof block.tool_name === "string"

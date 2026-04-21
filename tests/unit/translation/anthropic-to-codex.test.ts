@@ -620,14 +620,14 @@ describe("translateAnthropicToCodexRequest", () => {
   // ── Thinking block filtering ──────────────────────────────────────
 
   describe("thinking block handling", () => {
-    it("filters out thinking blocks from assistant text content", () => {
+    it("drops thinking blocks silently from assistant content (no compat note)", () => {
       const result = translateAnthropicToCodexRequest(
         makeRequest({
           messages: [
             {
               role: "assistant",
               content: [
-                { type: "thinking" as const, thinking: "internal thought" },
+                { type: "thinking" as const, thinking: "internal thought", signature: "sig_abc" },
                 { type: "text" as const, text: "visible answer" },
               ],
             },
@@ -638,12 +638,32 @@ describe("translateAnthropicToCodexRequest", () => {
         (i) => "role" in i && i.role === "assistant",
       );
       expect(assistantItem).toBeDefined();
-      expect((assistantItem as Record<string, unknown>).content).toBe(
-        "[Anthropic compatibility note] thinking block was downgraded to text.\nvisible answer",
-      );
+      // Thinking block is silently dropped. Only the text answer remains.
+      expect((assistantItem as Record<string, unknown>).content).toBe("visible answer");
     });
 
-    it("filters out redacted_thinking blocks from assistant content", () => {
+    it("drops thinking blocks without signature silently", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                { type: "thinking" as const, thinking: "stale thought" },
+                { type: "text" as const, text: "answer" },
+              ],
+            },
+          ],
+        }),
+      );
+      const assistantItem = result.input.find(
+        (i) => "role" in i && i.role === "assistant",
+      );
+      expect(assistantItem).toBeDefined();
+      expect((assistantItem as Record<string, unknown>).content).toBe("answer");
+    });
+
+    it("drops redacted_thinking blocks silently from assistant content", () => {
       const result = translateAnthropicToCodexRequest(
         makeRequest({
           messages: [
@@ -661,9 +681,26 @@ describe("translateAnthropicToCodexRequest", () => {
         (i) => "role" in i && i.role === "assistant",
       );
       expect(assistantItem).toBeDefined();
-      expect((assistantItem as Record<string, unknown>).content).toBe(
-        "[Anthropic compatibility note] redacted_thinking block was downgraded to text.\nanswer",
+      expect((assistantItem as Record<string, unknown>).content).toBe("answer");
+    });
+
+    it("produces no assistant item when message contains only thinking blocks", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                { type: "thinking" as const, thinking: "internal thought", signature: "sig_xyz" },
+              ],
+            },
+          ],
+        }),
       );
+      const assistantItem = result.input.find(
+        (i) => "role" in i && i.role === "assistant",
+      );
+      expect(assistantItem).toBeUndefined();
     });
   });
 

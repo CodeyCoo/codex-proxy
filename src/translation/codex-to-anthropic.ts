@@ -212,26 +212,11 @@ export async function* streamCodexToAnthropic(
       return;
     }
 
-    // Handle reasoning delta → thinking block (only if client wants thinking)
-    if (evt.reasoningDelta && wantThinking) {
-      hasContent = true;
-      yield* closeTextIfOpen();
-      // Open thinking block if not already open
-      if (!thinkingBlockStarted) {
-        pushSequenceEvent(sseSequence, "content_block_start:thinking");
-        yield formatSSE("content_block_start", {
-          type: "content_block_start",
-          index: contentIndex,
-          content_block: { type: "thinking", thinking: "" },
-        });
-        thinkingBlockStarted = true;
-      }
-      pushSequenceEvent(sseSequence, "content_block_delta:thinking");
-      yield formatSSE("content_block_delta", {
-        type: "content_block_delta",
-        index: contentIndex,
-        delta: { type: "thinking_delta", thinking: evt.reasoningDelta },
-      });
+    // Codex reasoning is intentionally dropped — the proxy cannot produce a
+    // valid Anthropic `thinking.signature`, so emitting a thinking block would
+    // poison the client's history and cause `Invalid signature` 400s when the
+    // conversation is later sent back to official Claude.
+    if (evt.reasoningDelta) {
       continue;
     }
 
@@ -387,7 +372,6 @@ export async function collectCodexToAnthropicResponse(
 }> {
   const id = `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
   let fullText = "";
-  let fullReasoning = "";
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedTokens: number | undefined;
@@ -404,7 +388,7 @@ export async function collectCodexToAnthropicResponse(
       throw new Error(`Codex API error: ${evt.error.code}: ${evt.error.message}`);
     }
     if (evt.textDelta) fullText += evt.textDelta;
-    if (evt.reasoningDelta) fullReasoning += evt.reasoningDelta;
+    // Codex reasoning is intentionally dropped (see below) — don't accumulate.
     if (evt.usage) {
       inputTokens = evt.usage.input_tokens;
       outputTokens = evt.usage.output_tokens;
@@ -435,10 +419,10 @@ export async function collectCodexToAnthropicResponse(
 
   const hasToolCalls = toolUseBlocks.length > 0;
   const content: AnthropicContentBlock[] = [];
-  // Thinking block comes first if requested and available
-  if (wantThinking && fullReasoning) {
-    content.push({ type: "thinking", thinking: fullReasoning });
-  }
+  // Codex reasoning is intentionally dropped — the proxy cannot produce a
+  // valid Anthropic `thinking.signature`, so emitting a thinking block would
+  // poison the client's history and cause `Invalid signature` 400s when the
+  // conversation is later sent back to official Claude.
   if (fullText) {
     content.push({ type: "text", text: fullText });
   }
