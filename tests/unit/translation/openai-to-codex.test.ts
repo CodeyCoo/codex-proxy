@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("@src/config.js", () => ({
   getConfig: vi.fn(() => ({
     model: {
-      default: "gpt-5.2-codex",
+      default: "gpt-5.3-codex",
       default_reasoning_effort: null,
       default_service_tier: null,
       suppress_desktop_directives: false,
@@ -72,6 +72,15 @@ describe("translateToCodexRequest", () => {
     expect(result.input[0]).toEqual({ role: "user", content: "Hello" });
     expect(result.stream).toBe(true);
     expect(result.store).toBe(false);
+  });
+
+  it("does not forward max token compatibility fields to Codex", () => {
+    const result = translateToCodexRequest(makeRequest({
+      max_tokens: 4096,
+      max_completion_tokens: 8192,
+      max_output_tokens: 16384,
+    }));
+    expect(result).not.toHaveProperty("max_output_tokens");
   });
 
   it("extracts system messages as instructions", () => {

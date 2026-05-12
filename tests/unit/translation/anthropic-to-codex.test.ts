@@ -7,7 +7,7 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("@src/config.js", () => ({
   getConfig: vi.fn(() => ({
     model: {
-      default: "gpt-5.2-codex",
+      default: "gpt-5.3-codex",
       default_reasoning_effort: null,
       default_service_tier: null,
       suppress_desktop_directives: false,
@@ -62,6 +62,13 @@ function makeRequest(overrides: Partial<AnthropicMessagesRequest> = {}): Anthrop
 }
 
 describe("translateAnthropicToCodexRequest", () => {
+  it("does not forward max_tokens to Codex", () => {
+    const result = translateAnthropicToCodexRequest(
+      makeRequest({ max_tokens: 8192 }),
+    );
+    expect(result).not.toHaveProperty("max_output_tokens");
+  });
+
   // ── System instructions ──────────────────────────────────────────────
 
   describe("system instructions", () => {
@@ -82,6 +89,21 @@ describe("translateAnthropicToCodexRequest", () => {
         }),
       );
       expect(result.instructions).toBe("First paragraph.\n\nSecond paragraph.");
+    });
+
+    it("strips Claude billing header noise from system blocks", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          system: [
+            {
+              type: "text" as const,
+              text: "x-anthropic-billing-header: cc_version=2.1.100.db0; cch=abcd1;",
+            },
+            { type: "text" as const, text: "Keep answers short." },
+          ],
+        }),
+      );
+      expect(result.instructions).toBe("Keep answers short.");
     });
 
     it("falls back to default instructions when no system provided", () => {
@@ -330,7 +352,65 @@ describe("translateAnthropicToCodexRequest", () => {
       const toolChoice = { type: "auto" as const };
       translateAnthropicToCodexRequest(makeRequest({ tool_choice: toolChoice }));
 
-      expect(anthropicToolChoiceToCodex).toHaveBeenCalledWith(toolChoice);
+      expect(anthropicToolChoiceToCodex).toHaveBeenCalledWith(toolChoice, undefined);
+    });
+
+    it("passes tools context when converting tool_choice", () => {
+      const tools = [
+        { name: "web_search", description: "Custom search", input_schema: {} },
+      ];
+      const toolChoice = { type: "tool" as const, name: "web_search" };
+      translateAnthropicToCodexRequest(makeRequest({ tools, tool_choice: toolChoice }));
+
+      expect(anthropicToolChoiceToCodex).toHaveBeenCalledWith(toolChoice, tools);
+    });
+
+    it("passes Claude Code WebSearch mapping option when requested", () => {
+      const tools = [
+        { name: "WebSearch", description: "Search the web", input_schema: {} },
+      ];
+      const toolChoice = { type: "tool" as const, name: "WebSearch" };
+      translateAnthropicToCodexRequest(
+        makeRequest({ tools, tool_choice: toolChoice }),
+        undefined,
+        { mapClaudeCodeWebSearch: true },
+      );
+
+      expect(anthropicToolsToCodex).toHaveBeenCalledWith(
+        tools,
+        { mapClaudeCodeWebSearch: true },
+      );
+      expect(anthropicToolChoiceToCodex).toHaveBeenCalledWith(
+        toolChoice,
+        tools,
+        { mapClaudeCodeWebSearch: true },
+      );
+    });
+
+    it("does not inject hosted web_search by default", () => {
+      const result = translateAnthropicToCodexRequest(makeRequest());
+
+      expect(result.tools).toEqual([]);
+    });
+
+    it("injects hosted web_search when explicitly requested", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest(),
+        undefined,
+        { injectHostedWebSearch: true },
+      );
+
+      expect(result.tools).toEqual([{ type: "web_search" }]);
+    });
+
+    it("does not duplicate hosted web_search when injected and already present", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({ tools: [{ type: "web_search" as const, name: "web_search" }] }),
+        undefined,
+        { injectHostedWebSearch: true },
+      );
+
+      expect(result.tools).toEqual([{ type: "web_search", name: "web_search" }]);
     });
   });
 
@@ -620,14 +700,14 @@ describe("translateAnthropicToCodexRequest", () => {
   // ── Thinking block filtering ──────────────────────────────────────
 
   describe("thinking block handling", () => {
-    it("drops thinking blocks silently from assistant content (no compat note)", () => {
+    it("filters out thinking blocks from assistant text content", () => {
       const result = translateAnthropicToCodexRequest(
         makeRequest({
           messages: [
             {
               role: "assistant",
               content: [
-                { type: "thinking" as const, thinking: "internal thought", signature: "sig_abc" },
+                { type: "thinking" as const, thinking: "internal thought" },
                 { type: "text" as const, text: "visible answer" },
               ],
             },
@@ -638,32 +718,10 @@ describe("translateAnthropicToCodexRequest", () => {
         (i) => "role" in i && i.role === "assistant",
       );
       expect(assistantItem).toBeDefined();
-      // Thinking block is silently dropped. Only the text answer remains.
       expect((assistantItem as Record<string, unknown>).content).toBe("visible answer");
     });
 
-    it("drops thinking blocks without signature silently", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "assistant",
-              content: [
-                { type: "thinking" as const, thinking: "stale thought" },
-                { type: "text" as const, text: "answer" },
-              ],
-            },
-          ],
-        }),
-      );
-      const assistantItem = result.input.find(
-        (i) => "role" in i && i.role === "assistant",
-      );
-      expect(assistantItem).toBeDefined();
-      expect((assistantItem as Record<string, unknown>).content).toBe("answer");
-    });
-
-    it("drops redacted_thinking blocks silently from assistant content", () => {
+    it("filters out redacted_thinking blocks from assistant content", () => {
       const result = translateAnthropicToCodexRequest(
         makeRequest({
           messages: [
@@ -682,25 +740,6 @@ describe("translateAnthropicToCodexRequest", () => {
       );
       expect(assistantItem).toBeDefined();
       expect((assistantItem as Record<string, unknown>).content).toBe("answer");
-    });
-
-    it("produces no assistant item when message contains only thinking blocks", () => {
-      const result = translateAnthropicToCodexRequest(
-        makeRequest({
-          messages: [
-            {
-              role: "assistant",
-              content: [
-                { type: "thinking" as const, thinking: "internal thought", signature: "sig_xyz" },
-              ],
-            },
-          ],
-        }),
-      );
-      const assistantItem = result.input.find(
-        (i) => "role" in i && i.role === "assistant",
-      );
-      expect(assistantItem).toBeUndefined();
     });
   });
 

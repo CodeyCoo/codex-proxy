@@ -31,7 +31,7 @@ vi.mock("@src/config.js", () => ({
       rate_limit_backoff_seconds: 60,
     },
     model: {
-      default: "gpt-5.2-codex",
+      default: "gpt-5.3-codex",
       default_reasoning_effort: null,
       default_service_tier: null,
     },
@@ -72,7 +72,7 @@ describe("account-routing integration", () => {
         rate_limit_backoff_seconds: 60,
       },
       model: {
-        default: "gpt-5.2-codex",
+        default: "gpt-5.3-codex",
         default_reasoning_effort: null,
         default_service_tier: null,
       },
@@ -123,7 +123,7 @@ describe("account-routing integration", () => {
     vi.mocked(getModelPlanTypes).mockReturnValue([]);
 
     // When no plan constraint, any account is a candidate
-    const acquired = pool.acquire({ model: "gpt-5.2-codex" });
+    const acquired = pool.acquire({ model: "gpt-5.3-codex" });
     expect(acquired).not.toBeNull();
   });
 
@@ -165,7 +165,7 @@ describe("account-routing integration", () => {
         rate_limit_backoff_seconds: 60,
       },
       model: {
-        default: "gpt-5.2-codex",
+        default: "gpt-5.3-codex",
         default_reasoning_effort: null,
         default_service_tier: null,
       },
@@ -204,7 +204,7 @@ describe("account-routing integration", () => {
     // Acquire A and mark it rate limited
     const acqA = pool.acquire()!;
     expect(acqA.entryId).toBe(idA);
-    pool.markRateLimited(acqA.entryId);
+    pool.applyRateLimit429(acqA.entryId);
 
     // Next acquire should skip A and return B
     const acqB = pool.acquire()!;
@@ -219,7 +219,7 @@ describe("account-routing integration", () => {
     expect(acq.entryId).toBe(id);
 
     // Mark rate limited with very short backoff (negative = already expired)
-    pool.markRateLimited(acq.entryId, { retryAfterSec: -1 });
+    pool.applyRateLimit429(acq.entryId, { retryAfterSec: -1 });
 
     // Should auto-recover immediately since backoff has passed
     const recovered = pool.acquire();

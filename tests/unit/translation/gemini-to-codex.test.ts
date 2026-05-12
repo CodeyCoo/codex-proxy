@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("@src/config.js", () => ({
   getConfig: vi.fn(() => ({
     model: {
-      default: "gpt-5.2-codex",
+      default: "gpt-5.3-codex",
       default_reasoning_effort: null,
       default_service_tier: null,
       suppress_desktop_directives: false,
@@ -240,6 +240,18 @@ describe("translateGeminiToCodexRequest", () => {
       "gpt-5.4",
     );
     expect(result.reasoning?.effort).toBe("medium");
+  });
+
+  it("does not forward maxOutputTokens to Codex", () => {
+    const result = translateGeminiToCodexRequest(
+      makeRequest({
+        generationConfig: {
+          maxOutputTokens: 8192,
+        },
+      }),
+      "gpt-5.4",
+    );
+    expect(result).not.toHaveProperty("max_output_tokens");
   });
 
   it("maps model suffix -fast to service_tier", () => {
