@@ -11,6 +11,15 @@ interface AffinityEntry {
   entryId: string;
   conversationId: string;
   turnState?: string;
+  instructions?: string;
+  inputTokens?: number;
+  functionCallIds?: string[];
+  /** Identifies the (instructions + tools) "shape" of the request that
+   *  produced this response. Used by routes that need to keep concurrent
+   *  variants of the same conversation (sub-agents, parallel tool calls)
+   *  on independent prev_response_id chains. Optional for back-compat with
+   *  routes that don't compute it (e.g. [Responses] / [Chat] / [Gemini]). */
+  variantHash?: string;
   createdAt: number;
 }
 
@@ -28,8 +37,26 @@ export class SessionAffinityMap {
   }
 
   /** Record that a response was created by a specific account in a conversation. */
-  record(responseId: string, entryId: string, conversationId: string, turnState?: string): void {
-    this.map.set(responseId, { entryId, conversationId, turnState, createdAt: Date.now() });
+  record(
+    responseId: string,
+    entryId: string,
+    conversationId: string,
+    turnState?: string,
+    instructions?: string,
+    inputTokens?: number,
+    functionCallIds?: string[],
+    variantHash?: string,
+  ): void {
+    this.map.set(responseId, {
+      entryId,
+      conversationId,
+      turnState,
+      instructions,
+      inputTokens,
+      functionCallIds: functionCallIds ? [...functionCallIds] : undefined,
+      variantHash,
+      createdAt: Date.now(),
+    });
   }
 
   /** Look up which account created a given response. */
@@ -44,10 +71,64 @@ export class SessionAffinityMap {
     return entry?.conversationId ?? null;
   }
 
+  /** Look up the latest response ID recorded for a conversation.
+   *  When `maxAgeMs` is provided, entries older than that are skipped — used
+   *  by implicit-resume to avoid handing the upstream a `previous_response_id`
+   *  whose prompt cache has likely already been evicted.
+   *  When `variantHash` is provided, only entries recorded with that exact
+   *  variantHash match — keeps sub-agents and main-thread chains independent. */
+  lookupLatestResponseIdByConversationId(
+    conversationId: string,
+    maxAgeMs?: number,
+    variantHash?: string,
+  ): string | null {
+    const now = Date.now();
+    let latestResponseId: string | null = null;
+    let latestCreatedAt = -1;
+    for (const [responseId, entry] of this.map) {
+      if (entry.conversationId !== conversationId) continue;
+      if (variantHash !== undefined && entry.variantHash !== variantHash) continue;
+      const liveEntry = this.getEntry(responseId);
+      if (!liveEntry) continue;
+      if (maxAgeMs !== undefined && now - liveEntry.createdAt > maxAgeMs) continue;
+      if (liveEntry.createdAt >= latestCreatedAt) {
+        latestCreatedAt = liveEntry.createdAt;
+        latestResponseId = responseId;
+      }
+    }
+    return latestResponseId;
+  }
+
   /** Look up the upstream turn-state token for a given response. */
   lookupTurnState(responseId: string): string | null {
     const entry = this.getEntry(responseId);
     return entry?.turnState ?? null;
+  }
+
+  lookupInstructions(responseId: string): string | null {
+    const entry = this.getEntry(responseId);
+    return entry?.instructions ?? null;
+  }
+
+  lookupLatestInstructionsByConversationId(conversationId: string): string | null {
+    const responseId = this.lookupLatestResponseIdByConversationId(conversationId);
+    if (!responseId) return null;
+    return this.lookupInstructions(responseId);
+  }
+
+  lookupInputTokens(responseId: string): number | null {
+    const entry = this.getEntry(responseId);
+    return entry?.inputTokens ?? null;
+  }
+
+  lookupFunctionCallIds(responseId: string): string[] {
+    const entry = this.getEntry(responseId);
+    return entry?.functionCallIds ? [...entry.functionCallIds] : [];
+  }
+
+  /** Drop a response ID — called after upstream rejects it as not-found. */
+  forget(responseId: string): void {
+    this.map.delete(responseId);
   }
 
   private getEntry(responseId: string): AffinityEntry | null {
@@ -68,21 +149,6 @@ export class SessionAffinityMap {
         this.map.delete(key);
       }
     }
-  }
-
-  /**
-   * Count active sessions per account entry within a recent time window.
-   * Only sessions with activity in the last `windowMs` are counted.
-   */
-  countByEntry(windowMs: number = 30 * 60 * 1000): Map<string, number> {
-    const now = Date.now();
-    const counts = new Map<string, number>();
-    for (const entry of this.map.values()) {
-      if (now - entry.createdAt > this.ttlMs) continue; // expired
-      if (now - entry.createdAt > windowMs) continue;   // outside active window
-      counts.set(entry.entryId, (counts.get(entry.entryId) ?? 0) + 1);
-    }
-    return counts;
   }
 
   get size(): number {

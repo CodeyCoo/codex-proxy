@@ -7,11 +7,11 @@
 
 import { getConfig } from "../config.js";
 import { getModelPlanTypes, isPlanFetched } from "../models/model-store.js";
+import { hasReachedCachedQuota } from "./quota-skip.js";
 import { getRotationStrategy } from "./rotation-strategy.js";
 import type { RotationStrategy, RotationState, RotationStrategyName } from "./rotation-strategy.js";
 import type { AccountRegistry } from "./account-registry.js";
 import type { AccountEntry, AcquiredAccount } from "./types.js";
-import { getSessionAffinityMap } from "./session-affinity.js";
 
 const ACQUIRE_LOCK_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -71,14 +71,17 @@ export class AccountLifecycle {
       }
     }
 
-    const maxConcurrent = getConfig().auth.max_concurrent_per_account ?? 3;
+    const config = getConfig();
+    const maxConcurrent = config.auth.max_concurrent_per_account ?? 3;
+    const skipExhausted = config.quota?.skip_exhausted === true;
     const excludeSet = options?.excludeIds?.length ? new Set(options.excludeIds) : null;
 
     const available = entries.filter(
       (a) =>
         a.status === "active" &&
         this.slotCount(a.id) < maxConcurrent &&
-        (!excludeSet || !excludeSet.has(a.id)),
+        (!excludeSet || !excludeSet.has(a.id)) &&
+        (!skipExhausted || !hasReachedCachedQuota(a)),
     );
 
     if (available.length === 0) return null;
@@ -101,15 +104,29 @@ export class AccountLifecycle {
       }
     }
 
+    // Tier-based filtering: when configured, restrict to the highest available tier
+    const tierPriority = config.auth.tier_priority;
+    if (tierPriority && tierPriority.length > 0) {
+      const tierOrder = new Map(tierPriority.map((t, i) => [t, i]));
+      let bestIdx = Infinity;
+      for (const c of candidates) {
+        const idx = c.planType != null ? (tierOrder.get(c.planType) ?? Infinity) : Infinity;
+        if (idx < bestIdx) bestIdx = idx;
+      }
+      if (bestIdx < Infinity) {
+        const bestTier = tierPriority[bestIdx];
+        const tierFiltered = candidates.filter((c) => c.planType === bestTier);
+        if (tierFiltered.length > 0) candidates = tierFiltered;
+      }
+    }
+
     // Session affinity: prefer the account that owns the conversation
     let selected: AccountEntry;
     if (options?.preferredEntryId) {
       const preferred = candidates.find((a) => a.id === options.preferredEntryId);
       selected = preferred ?? this.strategy.select(candidates, this.rotationState);
     } else {
-      // New conversation — pass active session counts so strategy can spread load
-      const sessionCounts = getSessionAffinityMap().countByEntry();
-      selected = this.strategy.select(candidates, this.rotationState, sessionCounts);
+      selected = this.strategy.select(candidates, this.rotationState);
     }
     const prevSlots = this.acquireLocks.get(selected.id);
     const prevSlotMs = prevSlots?.[prevSlots.length - 1] ?? null;
@@ -124,7 +141,15 @@ export class AccountLifecycle {
 
   release(
     entryId: string,
-    usage?: { input_tokens?: number; output_tokens?: number },
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      cached_tokens?: number;
+      image_input_tokens?: number;
+      image_output_tokens?: number;
+      image_request_attempted?: boolean;
+      image_request_succeeded?: boolean;
+    },
   ): void {
     this.popSlot(entryId);
     this.registry.recordUsage(entryId, usage);
@@ -146,7 +171,6 @@ export class AccountLifecycle {
   setRotationStrategy(name: RotationStrategyName): void {
     this.strategy = getRotationStrategy(name);
     this.rotationState.roundRobinIndex = 0;
-    this.rotationState.lastSelectedId = null;
   }
 
   getDistinctPlanAccounts(): Array<{
@@ -156,14 +180,20 @@ export class AccountLifecycle {
     accountId: string | null;
   }> {
     const now = new Date();
-    const maxConcurrent = getConfig().auth.max_concurrent_per_account ?? 3;
+    const config = getConfig();
+    const maxConcurrent = config.auth.max_concurrent_per_account ?? 3;
+    const skipExhausted = config.quota?.skip_exhausted === true;
     const entries = this.registry.getAllEntries();
     for (const entry of entries) {
       this.registry.refreshStatus(entry, now);
     }
 
     const available = entries.filter(
-      (a: AccountEntry) => a.status === "active" && this.slotCount(a.id) < maxConcurrent && a.planType,
+      (a: AccountEntry) =>
+        a.status === "active" &&
+        this.slotCount(a.id) < maxConcurrent &&
+        a.planType &&
+        (!skipExhausted || !hasReachedCachedQuota(a)),
     );
 
     const byPlan = new Map<string, AccountEntry[]>();
@@ -177,10 +207,9 @@ export class AccountLifecycle {
       group.push(a);
     }
 
-    const sessionCounts = getSessionAffinityMap().countByEntry();
     const result: Array<{ planType: string; entryId: string; token: string; accountId: string | null }> = [];
     for (const [plan, group] of byPlan) {
-      const selected = this.strategy.select(group, this.rotationState, sessionCounts);
+      const selected = this.strategy.select(group, this.rotationState);
       this.pushSlot(selected.id);
       result.push({
         planType: plan,

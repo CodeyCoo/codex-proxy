@@ -6,7 +6,6 @@ export type AccountStatus =
   | "active"
   | "expired"
   | "quota_exhausted"
-  | "rate_limited"
   | "refreshing"
   | "disabled"
   | "banned";
@@ -15,9 +14,24 @@ export interface AccountUsage {
   request_count: number;
   input_tokens: number;
   output_tokens: number;
+  /** Cached prompt tokens billed at the discounted rate (subset of input_tokens). */
+  cached_tokens?: number;
+  /** image_generation tool tokens (gpt-image-2). Tracked separately from host-model tokens. */
+  image_input_tokens?: number;
+  image_output_tokens?: number;
+  /** image_generation request counts. Success = upstream returned non-zero output_tokens.
+   *  Failure = silent strip (Free plan), upstream error, or EmptyResponseError on a request
+   *  that declared the image_generation tool. */
+  image_request_count?: number;
+  image_request_failed_count?: number;
   empty_response_count: number;
   last_used: string | null;
-  rate_limit_until: string | null;
+  /**
+   * Legacy local-lock field, retired. Reads survive on disk to support
+   * in-place migration; new code MUST consult cachedQuota.*.limit_reached
+   * instead. Removed from runtime mutation by `migrateLegacyRateLimit`.
+   */
+  rate_limit_until?: string | null;
   /** Tracks the current rate limit window end (Unix seconds). When window rolls over, counters reset. */
   window_reset_at?: number | null;
   /** Per-window request count (resets when window expires). */
@@ -26,6 +40,14 @@ export interface AccountUsage {
   window_input_tokens?: number;
   /** Per-window output tokens (resets when window expires). */
   window_output_tokens?: number;
+  /** Per-window cached prompt tokens (resets when window expires). */
+  window_cached_tokens?: number;
+  /** Per-window image_generation input/output tokens. */
+  window_image_input_tokens?: number;
+  window_image_output_tokens?: number;
+  /** Per-window image_generation request counts. */
+  window_image_request_count?: number;
+  window_image_request_failed_count?: number;
   /** ISO timestamp of when window counters were last reset. */
   window_counters_reset_at?: string | null;
   /** Window duration in seconds, synced from backend, used for local window estimation. */
@@ -92,7 +114,21 @@ export interface CodexQuota {
     limit_reached: boolean;
     used_percent: number | null;
     reset_at: number | null;
+    limit_window_seconds: number | null;
   } | null;
+  /** All metered quota buckets returned by Codex app's /wham/usage additional_rate_limits. */
+  rate_limits_by_limit_id?: Record<string, {
+    limit_id: string;
+    limit_name: string | null;
+    allowed: boolean;
+    limit_reached: boolean;
+    used_percent: number | null;
+    reset_at: number | null;
+    limit_window_seconds: number | null;
+    secondary_rate_limit?: CodexQuotaWindow & {
+      limit_reached: boolean;
+    } | null;
+  }> | null;
 }
 
 /** Returned by acquire() */
