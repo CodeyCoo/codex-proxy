@@ -7,6 +7,7 @@
  */
 
 import type { CodexResponsesRequest, CodexSSEEvent } from "./codex-types.js";
+import type { ParsedRateLimit } from "./rate-limit-headers.js";
 
 export interface UpstreamCountTokensOptions {
   beta?: boolean;
@@ -23,7 +24,8 @@ export interface UpstreamAdapter {
   createResponse(
     req: CodexResponsesRequest,
     signal: AbortSignal,
-    extraHeaders?: Record<string, string>,
+    extraHeadersOrRateLimits?: Record<string, string> | ((rl: ParsedRateLimit) => void),
+    poolCtx?: unknown,
   ): Promise<Response>;
   /**
    * Optional native token-count endpoint for Anthropic-compatible /v1/messages/count_tokens.
