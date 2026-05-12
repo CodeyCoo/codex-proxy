@@ -89,6 +89,33 @@ export function applyEnvOverrides(
       (raw.server as Record<string, unknown>).port = parsed;
     }
   }
+  const ollamaEnabledEnv = process.env.OLLAMA_BRIDGE_ENABLED?.trim().toLowerCase();
+  const ollamaHostEnv = process.env.OLLAMA_BRIDGE_HOST?.trim();
+  const ollamaPortEnv = process.env.OLLAMA_BRIDGE_PORT?.trim();
+  const ollamaVersionEnv = process.env.OLLAMA_BRIDGE_VERSION?.trim();
+  const ollamaDisableVisionEnv = process.env.OLLAMA_BRIDGE_DISABLE_VISION?.trim().toLowerCase();
+  if (ollamaEnabledEnv || ollamaHostEnv || ollamaPortEnv || ollamaVersionEnv || ollamaDisableVisionEnv) {
+    if (!raw.ollama) raw.ollama = {};
+    const ollama = raw.ollama as Record<string, unknown>;
+    if (ollamaEnabledEnv) {
+      ollama.enabled = ["1", "true", "yes"].includes(ollamaEnabledEnv);
+    }
+    if (ollamaHostEnv) {
+      ollama.host = ollamaHostEnv;
+    }
+    if (ollamaPortEnv) {
+      const parsed = parseInt(ollamaPortEnv, 10);
+      if (!isNaN(parsed)) {
+        ollama.port = parsed;
+      }
+    }
+    if (ollamaVersionEnv) {
+      ollama.version = ollamaVersionEnv;
+    }
+    if (ollamaDisableVisionEnv) {
+      ollama.disable_vision = ["1", "true", "yes"].includes(ollamaDisableVisionEnv);
+    }
+  }
   // Only apply HTTPS_PROXY env if user hasn't explicitly set proxy_url in local.yaml
   const localTls = localOverrides?.tls as Record<string, unknown> | undefined;
   const localHasProxyUrl = localTls !== undefined && "proxy_url" in localTls;
