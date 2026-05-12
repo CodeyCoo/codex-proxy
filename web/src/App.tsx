@@ -14,13 +14,19 @@ import { ApiKeyManager } from "./components/ApiKeyManager";
 import { ProxySettings } from "./pages/ProxySettings";
 import { AccountManagement } from "./pages/AccountManagement";
 import { UsageStats } from "./pages/UsageStats";
+import { LogsPage } from "./pages/LogsPage";
+import { ErrorsPage } from "./pages/ErrorsPage";
 import { useAccounts } from "../../shared/hooks/use-accounts";
+import { useErrorLogsCount } from "../../shared/hooks/use-error-logs";
 import { useProxies } from "../../shared/hooks/use-proxies";
 import { useStatus } from "../../shared/hooks/use-status";
 import { useUpdateStatus } from "../../shared/hooks/use-update-status";
 import { useI18n, useT } from "../../shared/i18n/context";
 import { useDashboardAuth } from "../../shared/hooks/use-dashboard-auth";
 import type { TranslationKey } from "../../shared/i18n/translations";
+import { getShowUpdateDialogPreference, shouldAutoOpenUpdateModal } from "./update-modal-policy";
+
+export { shouldAutoOpenUpdateModal };
 
 const DashboardAuthCtx = createContext<{ onLogout?: () => void }>({});
 function useDashboardAuthCtx() { return useContext(DashboardAuthCtx); }
@@ -44,11 +50,12 @@ function useUpdateMessage() {
   } else if (!update.checking && update.error) { msg = update.error; color = "text-red-500"; }
 
   const hasUpdate = update.status?.proxy.update_available ?? false;
+  const showUpdateDialog = getShowUpdateDialogPreference(update.status);
   const proxyUpdateInfo = hasUpdate
     ? { mode: update.status!.proxy.mode, commits: update.status!.proxy.commits, changelog: update.status!.proxy.changelog ?? null, release: update.status!.proxy.release }
     : null;
 
-  return { ...update, msg, color, hasUpdate, proxyUpdateInfo };
+  return { ...update, msg, color, hasUpdate, showUpdateDialog, proxyUpdateInfo };
 }
 
 // ── Tab definitions ─────────────────────────────────────────────────
@@ -59,6 +66,8 @@ const TABS: Array<{ hash: string; label: TranslationKey }> = [
   { hash: "#/api-keys", label: "apiKeys" },
   { hash: "#/proxies", label: "proxySettings" },
   { hash: "#/usage-stats", label: "usageStats" },
+  { hash: "#/logs", label: "logs" },
+  { hash: "#/errors", label: "errorsTab" },
   { hash: "#/settings", label: "settings" },
 ];
 
@@ -97,13 +106,19 @@ function Dashboard() {
   const [showModal, setShowModal] = useState(false);
   const prevUpdateAvailable = useRef(false);
   const hash = useHash();
+  const errorCount = useErrorLogsCount();
 
   useEffect(() => {
-    if (update.hasUpdate && !prevUpdateAvailable.current && update.proxyUpdateInfo?.mode !== "electron") {
+    if (shouldAutoOpenUpdateModal({
+      hasUpdate: update.hasUpdate,
+      previousHasUpdate: prevUpdateAvailable.current,
+      mode: update.proxyUpdateInfo?.mode ?? null,
+      showUpdateDialog: update.showUpdateDialog,
+    })) {
       setShowModal(true);
     }
     prevUpdateAvailable.current = update.hasUpdate;
-  }, [update.hasUpdate, update.proxyUpdateInfo?.mode]);
+  }, [update.hasUpdate, update.proxyUpdateInfo?.mode, update.showUpdateDialog]);
 
   const handleProxyChange = async (accountId: string, proxyId: string) => {
     accounts.patchLocal(accountId, { proxyId });
@@ -129,6 +144,7 @@ function Dashboard() {
         commit={update.status?.proxy.commit ?? null}
         hasUpdate={update.hasUpdate}
         onLogout={onLogout}
+        unreadErrors={errorCount.unread}
       />
 
       <main class="flex-grow px-4 md:px-8 lg:px-40 py-8 flex justify-center">
@@ -159,7 +175,6 @@ function Dashboard() {
                 onImport={accounts.importAccounts}
                 onToggleStatus={accounts.toggleStatus}
                 onUpdateLabel={accounts.updateLabel}
-                onAddByRefreshToken={accounts.addByRefreshToken}
               />
               <ProxyPool proxies={proxies} />
             </div>
@@ -182,6 +197,14 @@ function Dashboard() {
 
           {activeTab === "#/usage-stats" && (
             <UsageStats embedded />
+          )}
+
+          {activeTab === "#/logs" && (
+            <LogsPage embedded />
+          )}
+
+          {activeTab === "#/errors" && (
+            <ErrorsPage />
           )}
 
           {activeTab === "#/settings" && (

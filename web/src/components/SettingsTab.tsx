@@ -1,4 +1,6 @@
 import { GeneralSettings } from "./GeneralSettings";
+import { LogsSettings } from "./LogsSettings";
+import { OllamaBridgeSettings } from "./OllamaBridgeSettings";
 import { QuotaSettings } from "./QuotaSettings";
 import { RotationSettings } from "./RotationSettings";
 import { SettingsPanel } from "./SettingsPanel";
@@ -6,6 +8,7 @@ import { ApiConfig } from "./ApiConfig";
 import { AnthropicSetup } from "./AnthropicSetup";
 import { CodeExamples } from "./CodeExamples";
 import { TestConnection } from "./TestConnection";
+import type { ModelFamily } from "../../../shared/hooks/use-status";
 
 interface SettingsTabProps {
   baseUrl: string;
@@ -13,17 +16,18 @@ interface SettingsTabProps {
   models: string[];
   selectedModel: string;
   onModelChange: (model: string) => void;
-  modelFamilies: Record<string, string[]>;
+  modelFamilies: ModelFamily[];
   selectedEffort: string;
   onEffortChange: (effort: string) => void;
-  selectedSpeed: string;
-  onSpeedChange: (speed: string) => void;
+  selectedSpeed: string | null;
+  onSpeedChange: (speed: string | null) => void;
 }
 
 export function SettingsTab(props: SettingsTabProps) {
   return (
     <div class="flex flex-col gap-6">
       <GeneralSettings />
+      <LogsSettings />
       <QuotaSettings />
       <RotationSettings />
       <SettingsPanel />
@@ -45,6 +49,7 @@ export function SettingsTab(props: SettingsTabProps) {
         reasoningEffort={props.selectedEffort}
         serviceTier={props.selectedSpeed}
       />
+      <OllamaBridgeSettings />
       <CodeExamples
         baseUrl={props.baseUrl}
         apiKey={props.apiKey}
