@@ -5,9 +5,10 @@
  *   0. ApiKeyPool entry matching the exact model name
  *   1. Explicit provider prefix: "openai:gpt-4o", "anthropic:claude-3-5-sonnet"
  *   2. model_routing config table: { "deepseek-chat": "deepseek" }
- *   3. Custom provider `models` list
- *   4. Built-in name pattern rules: "claude-*" → anthropic, "gemini-*" → gemini
- *   5. Default (codex)
+ *   3. Known Codex model IDs and aliases
+ *   4. Custom provider `models` list
+ *   5. Built-in name pattern rules: "claude-*" → anthropic, "gemini-*" → gemini
+ *   6. Default (codex)
  */
 
 import type { UpstreamAdapter } from "./upstream-adapter.js";
@@ -20,7 +21,7 @@ export type AdapterFactory = (entry: ApiKeyEntry) => UpstreamAdapter;
 export type UpstreamRouteMatch =
   | { kind: "api-key"; adapter: UpstreamAdapter; entry: ApiKeyEntry }
   | { kind: "adapter"; adapter: UpstreamAdapter }
-  | { kind: "codex"; adapter: UpstreamAdapter }
+  | { kind: "codex"; adapter?: UpstreamAdapter }
   | { kind: "not-found" };
 
 export class UpstreamRouter {
@@ -42,10 +43,6 @@ export class UpstreamRouter {
     return explicitProvider ? [model, explicitProvider.bareModel] : [model];
   }
 
-  private getDefaultAdapter(): UpstreamAdapter | undefined {
-    return this.adapters.get(this.defaultTag) ?? this.adapters.values().next().value;
-  }
-
   constructor(
     private readonly adapters: Map<string, UpstreamAdapter>,
     private readonly modelRouting: Record<string, string>,
@@ -59,7 +56,6 @@ export class UpstreamRouter {
   }
 
   resolveMatch(model: string): UpstreamRouteMatch {
-    const defaultAdapter = this.getDefaultAdapter();
     const explicitProvider = this.splitExplicitProvider(model);
 
     if (this.apiKeyPool && this.adapterFactory) {
@@ -84,6 +80,10 @@ export class UpstreamRouter {
       if (adapter) return { kind: routedTag === this.defaultTag ? "codex" : "adapter", adapter };
     }
 
+    if (this.isKnownCodexModel(model)) {
+      return { kind: "codex" };
+    }
+
     if (/^claude/i.test(model) && this.adapters.has("anthropic")) {
       return { kind: "adapter", adapter: this.adapters.get("anthropic")! };
     }
@@ -91,16 +91,12 @@ export class UpstreamRouter {
       return { kind: "adapter", adapter: this.adapters.get("gemini")! };
     }
 
-    if (this.isKnownCodexModel(model) && defaultAdapter?.tag === "codex") {
-      return { kind: "codex", adapter: defaultAdapter };
-    }
-
     return { kind: "not-found" };
   }
 
   resolve(model: string): UpstreamAdapter {
     const match = this.resolveMatch(model);
-    if (match.kind === "not-found") {
+    if (match.kind === "not-found" || !match.adapter) {
       throw new Error(`No upstream adapter available for model \"${model}\"`);
     }
     return match.adapter;

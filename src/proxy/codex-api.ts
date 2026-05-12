@@ -15,13 +15,28 @@ import {
   buildHeaders,
   buildHeadersWithContentType,
 } from "../fingerprint/manager.js";
-import { createWebSocketResponse, type WsCreateRequest } from "./ws-transport.js";
+import { createWebSocketResponse, type WsCreateRequest, type WsPoolContext } from "./ws-transport.js";
 import type { ParsedRateLimit } from "./rate-limit-headers.js";
+import { getInstallationId } from "./installation-id.js";
+import { normalizeOpenAISubagent, OPENAI_SUBAGENT_HEADER } from "./openai-subagent.js";
+
+export type { WsPoolContext };
 import { parseSSEBlock, parseSSEStream } from "./codex-sse.js";
 import { fetchUsage } from "./codex-usage.js";
 import { fetchModels, probeEndpoint as probeEndpointFn } from "./codex-models.js";
 import type { CookieJar } from "./cookie-jar.js";
 import type { BackendModelEntry } from "../models/model-store.js";
+
+const X_CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata";
+const X_CODEX_BETA_FEATURES_HEADER = "x-codex-beta-features";
+const X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER = "x-responsesapi-include-timing-metrics";
+const X_CODEX_PARENT_THREAD_ID_HEADER = "x-codex-parent-thread-id";
+const X_CODEX_WINDOW_ID_HEADER = "x-codex-window-id";
+
+function normalizeServiceTierForUpstream(serviceTier: string | null | undefined): string | undefined {
+  if (!serviceTier) return undefined;
+  return serviceTier === "fast" ? "priority" : serviceTier;
+}
 
 // Re-export types from codex-types.ts for backward compatibility
 export type {
@@ -41,6 +56,7 @@ export { parseSSEBlock, parseSSEStream } from "./codex-sse.js";
 
 import {
   CodexApiError,
+  PreviousResponseWebSocketError,
   type CodexResponsesRequest,
   type CodexCompactRequest,
   type CodexCompactResponse,
@@ -83,6 +99,73 @@ export class CodexApi {
 
   private resolveTransport(): TlsTransport {
     return this.transport ?? getTransport();
+  }
+
+  private buildConversationIdentity(request: CodexResponsesRequest): {
+    conversationId: string | null;
+    windowId: string | null;
+  } {
+    const conversationId =
+      typeof request.prompt_cache_key === "string" && request.prompt_cache_key.trim()
+        ? request.prompt_cache_key.trim()
+        : null;
+    return {
+      conversationId,
+      windowId:
+        (typeof request.codexWindowId === "string" && request.codexWindowId.trim()
+          ? request.codexWindowId.trim()
+          : null) ??
+        (conversationId ? `${conversationId}:0` : null),
+    };
+  }
+
+  private firstRequestString(request: CodexResponsesRequest, key: string): string | null {
+    const direct =
+      key === X_CODEX_TURN_METADATA_HEADER
+        ? request.turnMetadata
+        : key === X_CODEX_BETA_FEATURES_HEADER
+          ? request.betaFeatures
+          : key === X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER
+            ? request.includeTimingMetrics
+            : key === X_CODEX_PARENT_THREAD_ID_HEADER
+              ? request.parentThreadId
+              : key === X_CODEX_WINDOW_ID_HEADER
+                ? request.codexWindowId
+                : undefined;
+    if (typeof direct === "string" && direct.trim()) return direct.trim();
+    const metadata = request.client_metadata?.[key];
+    if (typeof metadata === "string" && metadata.trim()) return metadata.trim();
+    return null;
+  }
+
+  private applyCodexContextHeaders(headers: Record<string, string>, request: CodexResponsesRequest): void {
+    if (request.turnState) headers["x-codex-turn-state"] = request.turnState;
+    const turnMetadata = this.firstRequestString(request, X_CODEX_TURN_METADATA_HEADER);
+    if (turnMetadata) headers[X_CODEX_TURN_METADATA_HEADER] = turnMetadata;
+    const betaFeatures = this.firstRequestString(request, X_CODEX_BETA_FEATURES_HEADER);
+    if (betaFeatures) headers[X_CODEX_BETA_FEATURES_HEADER] = betaFeatures;
+    const timingMetrics = this.firstRequestString(request, X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER);
+    if (timingMetrics) headers[X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER] = timingMetrics;
+    if (request.version?.trim()) headers["Version"] = request.version.trim();
+    const parentThreadId = this.firstRequestString(request, X_CODEX_PARENT_THREAD_ID_HEADER);
+    if (parentThreadId) headers[X_CODEX_PARENT_THREAD_ID_HEADER] = parentThreadId;
+  }
+
+  private buildCodexClientMetadata(
+    request: CodexResponsesRequest,
+    installationId: string,
+    windowId: string | null,
+  ): Record<string, string> {
+    const metadata: Record<string, string> = {
+      ...(request.client_metadata ?? {}),
+      "x-codex-installation-id": installationId,
+      ...(windowId ? { [X_CODEX_WINDOW_ID_HEADER]: windowId } : {}),
+    };
+    const turnMetadata = this.firstRequestString(request, X_CODEX_TURN_METADATA_HEADER);
+    if (turnMetadata) metadata[X_CODEX_TURN_METADATA_HEADER] = turnMetadata;
+    const parentThreadId = this.firstRequestString(request, X_CODEX_PARENT_THREAD_ID_HEADER);
+    if (parentThreadId) metadata[X_CODEX_PARENT_THREAD_ID_HEADER] = parentThreadId;
+    return metadata;
   }
 
   setToken(token: string): void {
@@ -167,18 +250,32 @@ export class CodexApi {
   /**
    * Create a response (streaming).
    * Routes to WebSocket when previous_response_id is present (HTTP SSE doesn't support it).
-   * Falls back to HTTP SSE if WebSocket fails.
+   * 仅当不依赖 previous_response_id 时，WebSocket 失败后才降级到 HTTP SSE。
    */
   async createResponse(
     request: CodexResponsesRequest,
     signal?: AbortSignal,
     onRateLimits?: (rl: ParsedRateLimit) => void,
+    poolCtx?: WsPoolContext,
   ): Promise<Response> {
     if (request.useWebSocket) {
       try {
-        return await this.createResponseViaWebSocket(request, signal, onRateLimits);
+        return await this.createResponseViaWebSocket(request, signal, onRateLimits, poolCtx);
       } catch (err) {
+        // Real upstream API errors classified by ws-transport (e.g.
+        // usage_limit_reached → CodexApiError(429)) must reach the
+        // proxy-handler's rotation flow on the SAME account, not retry
+        // via HTTP — HTTP would just hit the same quota.
+        if (err instanceof CodexApiError) {
+          throw err;
+        }
         const msg = err instanceof Error ? err.message : String(err);
+        if (request.previous_response_id) {
+          console.warn(
+            `[CodexApi] WebSocket 失败（${msg}），previous_response_id 不能安全降级到 HTTP SSE`,
+          );
+          throw new PreviousResponseWebSocketError(msg);
+        }
         console.warn(`[CodexApi] WebSocket failed (${msg}), falling back to HTTP SSE`);
         const { previous_response_id: _, useWebSocket: _ws, ...httpRequest } = request;
         return this.createResponseViaHttp(httpRequest as CodexResponsesRequest, signal);
@@ -196,6 +293,7 @@ export class CodexApi {
     request: CodexResponsesRequest,
     signal?: AbortSignal,
     onRateLimits?: (rl: ParsedRateLimit) => void,
+    poolCtx?: WsPoolContext,
   ): Promise<Response> {
     const baseUrl = this.resolveBaseUrl();
     const wsUrl = baseUrl.replace(/^https?:/, "wss:") + "/codex/responses";
@@ -206,26 +304,41 @@ export class CodexApi {
     headers["OpenAI-Beta"] = "responses_websockets=2026-02-06";
     headers["x-openai-internal-codex-residency"] = "us";
     headers["x-client-request-id"] = crypto.randomUUID();
-    if (request.turnState) headers["x-codex-turn-state"] = request.turnState;
+    const installationId = getInstallationId();
+    headers["x-codex-installation-id"] = installationId;
+    const identity = this.buildConversationIdentity(request);
+    if (identity.conversationId) {
+      headers["x-client-request-id"] = identity.conversationId;
+      headers["session_id"] = identity.conversationId;
+    }
+    if (identity.windowId) headers["x-codex-window-id"] = identity.windowId;
+    this.applyCodexContextHeaders(headers, request);
+    const openAiSubagent = normalizeOpenAISubagent(request.client_metadata?.[OPENAI_SUBAGENT_HEADER]);
+    if (openAiSubagent) headers[OPENAI_SUBAGENT_HEADER] = openAiSubagent;
 
     const wsRequest: WsCreateRequest = {
       type: "response.create",
       model: request.model,
       instructions: request.instructions ?? "",
       input: request.input,
+      store: false,
+      stream: true,
     };
     if (request.previous_response_id) {
       wsRequest.previous_response_id = request.previous_response_id;
     }
     if (request.reasoning) wsRequest.reasoning = request.reasoning;
     if (request.tools?.length) wsRequest.tools = request.tools;
-    if (request.tool_choice) wsRequest.tool_choice = request.tool_choice;
+    wsRequest.tool_choice = request.tool_choice ?? "auto";
+    wsRequest.parallel_tool_calls = request.parallel_tool_calls ?? true;
     if (request.text) wsRequest.text = request.text;
-    // service_tier is stripped — Codex backend rejects it ("Unsupported service_tier")
+    const serviceTier = normalizeServiceTierForUpstream(request.service_tier);
+    if (serviceTier) wsRequest.service_tier = serviceTier;
     if (request.prompt_cache_key) wsRequest.prompt_cache_key = request.prompt_cache_key;
     if (request.include?.length) wsRequest.include = request.include;
+    wsRequest.client_metadata = this.buildCodexClientMetadata(request, installationId, identity.windowId);
 
-    return createWebSocketResponse(wsUrl, headers, wsRequest, signal, this.proxyUrl, onRateLimits);
+    return createWebSocketResponse(wsUrl, headers, wsRequest, signal, this.proxyUrl, onRateLimits, poolCtx);
   }
 
   /**
@@ -247,10 +360,38 @@ export class CodexApi {
     headers["OpenAI-Beta"] = "responses_websockets=2026-02-06";
     headers["x-openai-internal-codex-residency"] = "us";
     headers["x-client-request-id"] = crypto.randomUUID();
-    if (request.turnState) headers["x-codex-turn-state"] = request.turnState;
+    const installationId = getInstallationId();
+    headers["x-codex-installation-id"] = installationId;
+    const identity = this.buildConversationIdentity(request);
+    if (identity.conversationId) {
+      headers["x-client-request-id"] = identity.conversationId;
+      headers["session_id"] = identity.conversationId;
+    }
+    if (identity.windowId) headers["x-codex-window-id"] = identity.windowId;
+    this.applyCodexContextHeaders(headers, request);
+    const openAiSubagent = normalizeOpenAISubagent(request.client_metadata?.[OPENAI_SUBAGENT_HEADER]);
+    if (openAiSubagent) headers[OPENAI_SUBAGENT_HEADER] = openAiSubagent;
 
-    const { previous_response_id: _pid, useWebSocket: _ws, turnState: _ts, service_tier: _st, ...bodyFields } = request;
-    const body = JSON.stringify(bodyFields);
+    const {
+      previous_response_id: _pid,
+      useWebSocket: _ws,
+      turnState: _ts,
+      turnMetadata: _tm,
+      betaFeatures: _bf,
+      version: _ver,
+      includeTimingMetrics: _timing,
+      codexWindowId: _window,
+      parentThreadId: _parent,
+      service_tier,
+      ...bodyFields
+    } = request;
+    const upstreamServiceTier = normalizeServiceTierForUpstream(service_tier);
+    const bodyWithMetadata = {
+      ...bodyFields,
+      ...(upstreamServiceTier ? { service_tier: upstreamServiceTier } : {}),
+      client_metadata: this.buildCodexClientMetadata(request, installationId, identity.windowId),
+    };
+    const body = JSON.stringify(bodyWithMetadata);
 
     let transportRes;
     try {
@@ -312,6 +453,7 @@ export class CodexApi {
     headers["OpenAI-Beta"] = "responses_websockets=2026-02-06";
     headers["x-openai-internal-codex-residency"] = "us";
     headers["x-client-request-id"] = crypto.randomUUID();
+    headers["x-codex-installation-id"] = getInstallationId();
 
     const body = JSON.stringify(request);
 
@@ -356,4 +498,4 @@ export class CodexApi {
 }
 
 // Re-export CodexApiError for backward compatibility
-export { CodexApiError } from "./codex-types.js";
+export { CodexApiError, PreviousResponseWebSocketError } from "./codex-types.js";
