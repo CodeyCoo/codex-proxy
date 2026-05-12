@@ -9,7 +9,7 @@ client:
   arch: arm64
   chromium_version: "144"
 model:
-  default: gpt-5.2-codex
+  default: gpt-5.4
   default_reasoning_effort: null
   default_service_tier: null
   inject_desktop_context: false
@@ -29,6 +29,14 @@ server:
   port: 8080
   proxy_api_key: null
   trust_proxy: false
+logs:
+  enabled: false
+  capacity: 2000
+  capture_body: false
+  llm_only: true
+usage_stats:
+  # null = keep usage history forever
+  history_retention_days: null
 session:
   ttl_minutes: 60
   cleanup_interval_minutes: 5
@@ -49,3 +57,18 @@ quota:
   skip_exhausted: true
 update:
   auto_update: true
+  show_update_dialog: false
+  # allow_prerelease: false  # set true to receive beta builds (vX.Y.Z-beta.SHA) from the dev branch
+ollama:
+  enabled: false
+  host: 127.0.0.1
+  port: 11434
+  version: "0.18.3"
+  disable_vision: false
+official_agent:
+  enabled: false
+  api_key: null
+  app_server_url: ws://127.0.0.1:4500
+  request_timeout_ms: 30000
+  auth:
+    type: none

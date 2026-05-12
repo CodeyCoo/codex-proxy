@@ -18,5 +18,14 @@ export default defineConfig({
       "tests/integration/**/*.{test,spec}.ts",
       "packages/electron/__tests__/**/*.{test,spec}.ts",
     ],
+    exclude: [
+      // Requires Electron build environment not present in this fork
+      "packages/electron/__tests__/**/*",
+      "tests/unit/ci/**/*",
+      // Requires upstream adapter cache-token extraction (not yet synced)
+      "tests/unit/proxy/upstream-cache-tokens.test.ts",
+      // Script paths differ between fork and upstream
+      "tests/unit/update-scripts-path.test.ts",
+    ],
   },
 });

@@ -7,13 +7,13 @@
 # Dynamic fetch merges with static; backend entries win for shared IDs.
 # Models endpoint now requires ?client_version= query parameter.
 #
-# Last updated: 2026-03-22 (gpt-5.4 family restored to backend)
+# Last updated: 2026-05-08 (Codex runtime context metadata)
 
 models:
-  # ── GPT-5.4 family (current flagship) ───────────────────────────────
-  - id: gpt-5.4
-    displayName: GPT-5.4
-    description: Latest frontier agentic coding model
+  # ── GPT-5.5 (newest general-purpose, Plus-only) ─────────────────────
+  - id: gpt-5.5
+    displayName: GPT-5.5
+    description: Latest general-purpose flagship
     isDefault: false
     supportedReasoningEfforts:
       - { reasoningEffort: low,    description: "Fast responses with lighter reasoning" }
@@ -22,6 +22,31 @@ models:
       - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
     defaultReasoningEffort: medium
     inputModalities: [text, image]
+    outputModalities: [text]
+    contextWindow: 272000
+    maxContextWindow: 272000
+    maxOutputTokens: 128000
+    truncationPolicyLimit: 10000
+    supportsPersonality: false
+    upgrade: null
+
+  # ── GPT-5.4 family (default flagship) ───────────────────────────────
+  - id: gpt-5.4
+    displayName: GPT-5.4
+    description: Latest frontier agentic coding model
+    isDefault: true
+    supportedReasoningEfforts:
+      - { reasoningEffort: low,    description: "Fast responses with lighter reasoning" }
+      - { reasoningEffort: medium, description: "Balances speed and reasoning depth" }
+      - { reasoningEffort: high,   description: "Greater reasoning depth for complex problems" }
+      - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
+    defaultReasoningEffort: medium
+    inputModalities: [text, image]
+    outputModalities: [text]
+    contextWindow: 272000
+    maxContextWindow: 1000000
+    maxOutputTokens: 128000
+    truncationPolicyLimit: 10000
     supportsPersonality: false
     upgrade: null
 
@@ -36,6 +61,9 @@ models:
       - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
     defaultReasoningEffort: medium
     inputModalities: [text, image]
+    outputModalities: [text]
+    contextWindow: 400000
+    maxOutputTokens: 128000
     supportsPersonality: false
     upgrade: null
 
@@ -51,22 +79,9 @@ models:
       - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
     defaultReasoningEffort: medium
     inputModalities: [text, image]
+    contextWindow: 400000
+    maxOutputTokens: 128000
     supportsPersonality: false
-    upgrade: null
-
-  # ── GPT-5.2 Codex ──────────────────────────────────────────────────
-  - id: gpt-5.2-codex
-    displayName: GPT-5.2 Codex
-    description: Frontier agentic coding model
-    isDefault: true
-    supportedReasoningEfforts:
-      - { reasoningEffort: low,    description: "Fast responses with lighter reasoning" }
-      - { reasoningEffort: medium, description: "Balances speed and reasoning depth" }
-      - { reasoningEffort: high,   description: "Greater reasoning depth for complex problems" }
-      - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
-    defaultReasoningEffort: medium
-    inputModalities: [text, image]
-    supportsPersonality: true
     upgrade: null
 
   # ── GPT-5.2 (general-purpose) ────────────────────────────────────────
@@ -81,60 +96,9 @@ models:
       - { reasoningEffort: xhigh,  description: "Extra high reasoning" }
     defaultReasoningEffort: medium
     inputModalities: [text, image]
+    contextWindow: 400000
+    maxOutputTokens: 128000
     supportsPersonality: true
-    upgrade: null
-
-  # ── GPT-5.1 Codex family ──────────────────────────────────────────
-  - id: gpt-5.1-codex-max
-    displayName: GPT-5.1 Codex Max
-    description: GPT-5.1 Codex — extended context / deepest reasoning
-    isDefault: false
-    supportedReasoningEfforts:
-      - { reasoningEffort: low,    description: "Fast responses" }
-      - { reasoningEffort: medium, description: "Balanced speed and quality" }
-      - { reasoningEffort: high,   description: "Deepest reasoning" }
-      - { reasoningEffort: xhigh,  description: "Extra high reasoning depth" }
-    defaultReasoningEffort: medium
-    inputModalities: [text, image]
-    supportsPersonality: false
-    upgrade: null
-
-  - id: gpt-5.1-codex
-    displayName: GPT-5.1 Codex
-    description: GPT-5.1 Codex
-    isDefault: false
-    supportedReasoningEfforts:
-      - { reasoningEffort: low,    description: "Fastest responses" }
-      - { reasoningEffort: medium, description: "Balanced speed and quality" }
-      - { reasoningEffort: high,   description: "Deepest reasoning" }
-    defaultReasoningEffort: medium
-    inputModalities: [text, image]
-    supportsPersonality: false
-    upgrade: null
-
-  - id: gpt-5.1
-    displayName: GPT-5.1
-    description: General-purpose GPT-5.1
-    isDefault: false
-    supportedReasoningEfforts:
-      - { reasoningEffort: low,    description: "Fastest responses" }
-      - { reasoningEffort: medium, description: "Balanced speed and quality" }
-      - { reasoningEffort: high,   description: "Deepest reasoning" }
-    defaultReasoningEffort: medium
-    inputModalities: [text, image]
-    supportsPersonality: false
-    upgrade: null
-
-  - id: gpt-5.1-codex-mini
-    displayName: GPT-5.1 Codex Mini
-    description: GPT-5.1 Codex Mini — lightweight, low-latency
-    isDefault: false
-    supportedReasoningEfforts:
-      - { reasoningEffort: medium, description: "Balanced" }
-      - { reasoningEffort: high,   description: "Greater reasoning" }
-    defaultReasoningEffort: medium
-    inputModalities: [text]
-    supportsPersonality: false
     upgrade: null
 
   # ── GPT-5 Codex family ──────────────────────────────────────────────
@@ -148,23 +112,12 @@ models:
       - { reasoningEffort: high,   description: "Deepest reasoning" }
     defaultReasoningEffort: medium
     inputModalities: [text, image]
+    contextWindow: 400000
+    maxOutputTokens: 128000
     supportsPersonality: false
     upgrade: null
 
-  - id: gpt-5
-    displayName: GPT-5
-    description: General-purpose GPT-5
-    isDefault: false
-    supportedReasoningEfforts:
-      - { reasoningEffort: minimal, description: "Fastest responses with limited reasoning" }
-      - { reasoningEffort: low,     description: "Fast responses" }
-      - { reasoningEffort: medium,  description: "Balanced" }
-      - { reasoningEffort: high,    description: "Deepest reasoning" }
-    defaultReasoningEffort: medium
-    inputModalities: [text, image]
-    supportsPersonality: false
-    upgrade: null
-
+  # No exact official token-limit page found for id gpt-5-codex-mini on 2026-05-08.
   - id: gpt-5-codex-mini
     displayName: GPT-5 Codex Mini
     description: GPT-5 Codex Mini — lightweight
@@ -174,6 +127,18 @@ models:
       - { reasoningEffort: high,   description: "Greater reasoning" }
     defaultReasoningEffort: medium
     inputModalities: [text]
+    supportsPersonality: false
+    upgrade: null
+
+  # ── Image generation (tool-invoked, not a chat model) ───────────────
+  - id: gpt-image-2
+    displayName: GPT Image 2
+    description: Image generation backend invoked via the image_generation tool (not a chat model)
+    isDefault: false
+    supportedReasoningEfforts: []
+    defaultReasoningEffort: medium
+    inputModalities: [text, image]
+    outputModalities: [image]
     supportsPersonality: false
     upgrade: null
 
@@ -188,6 +153,7 @@ models:
       - { reasoningEffort: high,   description: "Deepest reasoning" }
     defaultReasoningEffort: medium
     inputModalities: [text]
+    contextWindow: 131072
     supportsPersonality: false
     upgrade: null
 
@@ -201,8 +167,13 @@ models:
       - { reasoningEffort: high,   description: "Deepest reasoning" }
     defaultReasoningEffort: medium
     inputModalities: [text]
+    contextWindow: 131072
     supportsPersonality: false
     upgrade: null
 
+# User-editable aliases. Claude Desktop can expose Claude-shaped model names
+# while this gateway maps them to Codex model IDs internally.
 aliases:
-  codex: "gpt-5.2-codex"
+  claude-opus-4-7: gpt-5.5
+  claude-sonnet-4-6: gpt-5.4
+  claude-haiku-4-5: gpt-5.3-codex
