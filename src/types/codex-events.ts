@@ -16,9 +16,10 @@ export interface CodexResponseData {
     output_tokens: number;
     cached_tokens?: number;
     reasoning_tokens?: number;
+    /** Tokens billed for the image_generation tool (gpt-image-2). Tracked separately from host-model tokens. */
+    image_input_tokens?: number;
+    image_output_tokens?: number;
   };
-  stop_reason?: string;
-  stop_sequence?: string | null;
   [key: string]: unknown;
 }
 
@@ -125,8 +126,27 @@ export interface CodexOutputItemDoneEvent {
     call_id?: string;
     name?: string;
     arguments?: string;
+    content?: unknown[];
+    actions?: unknown[];
     [key: string]: unknown;
   };
+}
+
+export interface CodexOutputTextAnnotationAddedEvent {
+  type: "response.output_text.annotation.added";
+  outputIndex: number;
+  contentIndex: number;
+  annotationIndex: number;
+  annotation: Record<string, unknown>;
+}
+
+export interface CodexWebSearchCallEvent {
+  type:
+    | "response.web_search_call.in_progress"
+    | "response.web_search_call.searching"
+    | "response.web_search_call.completed";
+  outputIndex: number;
+  itemId: string;
 }
 
 export interface CodexIncompleteEvent {
@@ -167,6 +187,8 @@ export type TypedCodexEvent =
   | CodexCompletedEvent
   | CodexOutputItemAddedEvent
   | CodexOutputItemDoneEvent
+  | CodexOutputTextAnnotationAddedEvent
+  | CodexWebSearchCallEvent
   | CodexContentPartAddedEvent
   | CodexContentPartDoneEvent
   | CodexIncompleteEvent
@@ -183,16 +205,68 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+function safeStringify(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    const json = JSON.stringify(value);
+    return json ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function getErrorRecord(data: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(data)) return undefined;
+  if (isRecord(data.error)) return data.error;
+  if (isRecord(data.response) && isRecord(data.response.error)) return data.response.error;
+  return data;
+}
+
+export function extractCodexError(data: unknown): { type: string; code: string; message: string } {
+  const err = getErrorRecord(data);
+  if (!err) {
+    const message = safeStringify(data);
+    return {
+      type: "error",
+      code: message.trimStart().startsWith("{") ? "malformed_error_event" : "unknown",
+      message,
+    };
+  }
+
+  const dataRecord = isRecord(data) ? data : {};
+  const response = isRecord(dataRecord.response) ? dataRecord.response : {};
+  const message =
+    firstString(
+      err.message,
+      err.detail,
+      err.error_description,
+      dataRecord.message,
+      dataRecord.detail,
+      response.message,
+      response.detail,
+    ) ?? safeStringify(data);
+
+  const type = firstString(err.type, dataRecord.type) ?? "error";
+  const code =
+    firstString(err.code, response.code) ??
+    (type !== "error" && type !== "response.failed" ? type : "unknown");
+
+  return { type, code, message };
+}
+
 function parseResponseData(data: unknown): CodexResponseData | undefined {
   if (!isRecord(data)) return undefined;
   const resp = data.response;
   if (!isRecord(resp)) return undefined;
   const result: CodexResponseData = {};
   if (typeof resp.id === "string") result.id = resp.id;
-  if (typeof resp.stop_reason === "string") result.stop_reason = resp.stop_reason;
-  if (typeof resp.stop_sequence === "string" || resp.stop_sequence === null) {
-    result.stop_sequence = resp.stop_sequence as string | null;
-  }
   if (isRecord(resp.usage)) {
     result.usage = {
       input_tokens: typeof resp.usage.input_tokens === "number" ? resp.usage.input_tokens : 0,
@@ -207,6 +281,17 @@ function parseResponseData(data: unknown): CodexResponseData | undefined {
     const outputDetails = isRecord(resp.usage.output_tokens_details) ? resp.usage.output_tokens_details : undefined;
     if (outputDetails && typeof outputDetails.reasoning_tokens === "number") {
       result.usage.reasoning_tokens = outputDetails.reasoning_tokens;
+    }
+  }
+  // Extract image_generation tokens from tool_usage.image_gen (separate from host-model usage).
+  if (isRecord(resp.tool_usage) && isRecord(resp.tool_usage.image_gen)) {
+    const img = resp.tool_usage.image_gen;
+    const imgIn = typeof img.input_tokens === "number" ? img.input_tokens : 0;
+    const imgOut = typeof img.output_tokens === "number" ? img.output_tokens : 0;
+    if (imgIn > 0 || imgOut > 0) {
+      if (!result.usage) result.usage = { input_tokens: 0, output_tokens: 0 };
+      result.usage.image_input_tokens = imgIn;
+      result.usage.image_output_tokens = imgOut;
     }
   }
   return result;
@@ -241,6 +326,30 @@ export function parseCodexEvent(evt: CodexSSEEvent): TypedCodexEvent {
     case "response.output_text.done": {
       if (isRecord(data) && typeof data.text === "string") {
         return { type: "response.output_text.done", text: data.text };
+      }
+      return { type: "unknown", raw: data };
+    }
+    case "response.output_text.annotation.added": {
+      if (isRecord(data) && isRecord(data.annotation)) {
+        return {
+          type: "response.output_text.annotation.added",
+          outputIndex: typeof data.output_index === "number" ? data.output_index : 0,
+          contentIndex: typeof data.content_index === "number" ? data.content_index : 0,
+          annotationIndex: typeof data.annotation_index === "number" ? data.annotation_index : 0,
+          annotation: data.annotation,
+        };
+      }
+      return { type: "unknown", raw: data };
+    }
+    case "response.web_search_call.in_progress":
+    case "response.web_search_call.searching":
+    case "response.web_search_call.completed": {
+      if (isRecord(data)) {
+        return {
+          type: evt.event,
+          outputIndex: typeof data.output_index === "number" ? data.output_index : 0,
+          itemId: typeof data.item_id === "string" ? data.item_id : "",
+        };
       }
       return { type: "unknown", raw: data };
     }
@@ -352,33 +461,17 @@ export function parseCodexEvent(evt: CodexSSEEvent): TypedCodexEvent {
       return { type: "unknown", raw: data };
     }
     case "error": {
-      if (isRecord(data)) {
-        const err = isRecord(data.error) ? data.error : data;
-        return {
-          type: "error",
-          error: {
-            type: typeof err.type === "string" ? err.type : "error",
-            code: typeof err.code === "string" ? err.code : "unknown",
-            message: typeof err.message === "string" ? err.message : JSON.stringify(data),
-          },
-        };
-      }
       return {
         type: "error",
-        error: { type: "error", code: "unknown", message: String(data) },
+        error: extractCodexError(data),
       };
     }
     case "response.failed": {
       const resp = parseResponseData(data);
       if (isRecord(data)) {
-        const err = isRecord(data.error) ? data.error : {};
         return {
           type: "response.failed",
-          error: {
-            type: typeof err.type === "string" ? err.type : "error",
-            code: typeof err.code === "string" ? err.code : "unknown",
-            message: typeof err.message === "string" ? err.message : JSON.stringify(data),
-          },
+          error: extractCodexError(data),
           response: resp ?? {},
         };
       }
@@ -395,6 +488,8 @@ export function parseCodexEvent(evt: CodexSSEEvent): TypedCodexEvent {
             ...(typeof data.item.call_id === "string" ? { call_id: data.item.call_id } : {}),
             ...(typeof data.item.name === "string" ? { name: data.item.name } : {}),
             ...(typeof data.item.arguments === "string" ? { arguments: data.item.arguments } : {}),
+            ...(Array.isArray(data.item.content) ? { content: data.item.content } : {}),
+            ...(Array.isArray(data.item.actions) ? { actions: data.item.actions } : {}),
           },
         };
       }

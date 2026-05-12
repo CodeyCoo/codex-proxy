@@ -17,6 +17,13 @@ export interface UsageInfo {
   output_tokens: number;
   cached_tokens?: number;
   reasoning_tokens?: number;
+  /** Tokens billed by the image_generation tool (gpt-image-2). Separate from host-model usage. */
+  image_input_tokens?: number;
+  image_output_tokens?: number;
+  /** Set by the route handler when the request declared the image_generation tool.
+   *  Drives the success/failure split in `recordUsage`. */
+  image_request_attempted?: boolean;
+  image_request_succeeded?: boolean;
 }
 
 export interface FunctionCallStart {
@@ -46,6 +53,32 @@ export class EmptyResponseError extends Error {
   }
 }
 
+/**
+ * Upstream closed the SSE stream without sending `response.completed`,
+ * `response.failed`, or an `error` event. Observed when gpt-5.5 with
+ * `effort=xhigh` spends > 120 s in reasoning_summary before producing any
+ * output_text — the Codex backend caps total response duration and silently
+ * FINs the connection.
+ *
+ * Treated separately from EmptyResponseError because cross-account retry is
+ * useless (same workload re-hits the same cap on the next account) and just
+ * burns the pool. The proxy surfaces 504 to the client instead.
+ */
+export class UpstreamPrematureCloseError extends Error {
+  constructor(
+    public readonly responseId: string | null,
+    public readonly hadReasoning: boolean,
+    public readonly eventCount: number,
+  ) {
+    super(
+      hadReasoning
+        ? "Upstream closed stream after reasoning without producing output (likely hit response-duration cap)"
+        : "Upstream closed stream without a terminal event",
+    );
+    this.name = "UpstreamPrematureCloseError";
+  }
+}
+
 export interface ExtractedEvent {
   typed: TypedCodexEvent;
   responseId?: string;
@@ -70,10 +103,6 @@ export async function* iterateCodexEvents(
   const itemIdToCallInfo = new Map<string, { callId: string; name: string }>();
 
   for await (const raw of api.parseStream(rawResponse)) {
-    if (raw.event === "keepalive") {
-      continue;
-    }
-
     const typed = parseCodexEvent(raw);
     const extracted: ExtractedEvent = { typed };
 
@@ -86,7 +115,6 @@ export async function* iterateCodexEvents(
       case "response.created":
       case "response.in_progress":
         if (typed.response.id) extracted.responseId = typed.response.id;
-        if (typed.response.usage) extracted.usage = typed.response.usage;
         break;
 
       case "response.output_text.delta":
@@ -136,6 +164,10 @@ export async function* iterateCodexEvents(
       case "response.output_item.done":
       case "response.content_part.added":
       case "response.content_part.done":
+      case "response.output_text.annotation.added":
+      case "response.web_search_call.in_progress":
+      case "response.web_search_call.searching":
+      case "response.web_search_call.completed":
         // Lifecycle markers — no data extraction needed
         break;
 

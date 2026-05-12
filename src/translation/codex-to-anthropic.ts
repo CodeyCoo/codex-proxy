@@ -17,73 +17,39 @@ import type {
   AnthropicMessagesResponse,
   AnthropicUsage,
 } from "../types/anthropic.js";
-import {
-  iterateCodexEvents,
-  EmptyResponseError,
-  type UsageInfo,
-} from "./codex-event-extractor.js";
-import { log } from "../utils/logger.js";
+import { iterateCodexEvents, EmptyResponseError, type UsageInfo } from "./codex-event-extractor.js";
+import { codexApiErrorFromEvent } from "./codex-api-error-from-event.js";
+
+interface CacheUsageHint {
+  reusedInputTokensUpperBound?: number;
+  precomputedInputTokens?: number;
+}
+
+interface ResponseMetadata {
+  functionCallIds?: string[];
+}
+
+function resolveCacheUsage(
+  inputTokens: number,
+  cachedTokens: number | undefined,
+  usageHint?: CacheUsageHint,
+): { cacheReadTokens: number; cacheCreationTokens: number } {
+  let cacheReadTokens = cachedTokens ?? 0;
+  if (
+    cacheReadTokens <= 0 &&
+    inputTokens > 0 &&
+    usageHint?.reusedInputTokensUpperBound &&
+    usageHint.reusedInputTokensUpperBound > 0
+  ) {
+    cacheReadTokens = Math.min(usageHint.reusedInputTokensUpperBound, inputTokens);
+  }
+  const cacheCreationTokens = inputTokens > 0 ? Math.max(0, inputTokens - cacheReadTokens) : 0;
+  return { cacheReadTokens, cacheCreationTokens };
+}
 
 /** Format an Anthropic SSE event with named event type */
 function formatSSE(eventType: string, data: unknown): string {
   return `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
-function shouldLogAnthropicCompatibilityDebug(): boolean {
-  return process.env.DEBUG_ANTHROPIC_COMPAT === "1";
-}
-
-function summarizeAnthropicSseSequence(events: string[]): string[] {
-  const counts = new Map<string, number>();
-
-  for (const event of events) {
-    counts.set(event, (counts.get(event) ?? 0) + 1);
-  }
-
-  return [...counts.entries()]
-    .map(([event, count]) => `${event}x${count}`)
-    .sort();
-}
-
-function logAnthropicStreamDebug(extra: {
-  model: string;
-  wantThinking: boolean;
-  hasToolCalls: boolean;
-  sequence: string[];
-  usage?: UsageInfo;
-}): void {
-  if (!shouldLogAnthropicCompatibilityDebug()) return;
-
-  log.debug("[AnthropicCompat] SSE stream summary", {
-    model: extra.model,
-    wantThinking: extra.wantThinking,
-    hasToolUse: extra.hasToolCalls,
-    sequence: summarizeAnthropicSseSequence(extra.sequence),
-    usage: extra.usage,
-  });
-}
-
-function logAnthropicCollectDebug(extra: {
-  model: string;
-  wantThinking: boolean;
-  hasToolCalls: boolean;
-  contentTypes: string[];
-  usage: UsageInfo;
-}): void {
-  if (!shouldLogAnthropicCompatibilityDebug()) return;
-
-  log.debug("[AnthropicCompat] Collected response summary", {
-    model: extra.model,
-    wantThinking: extra.wantThinking,
-    hasToolUse: extra.hasToolCalls,
-    contentTypes: extra.contentTypes,
-    usage: extra.usage,
-  });
-}
-
-function pushSequenceEvent(sequence: string[], event: string): void {
-  if (!shouldLogAnthropicCompatibilityDebug()) return;
-  sequence.push(event);
 }
 
 /**
@@ -100,7 +66,8 @@ export async function* streamCodexToAnthropic(
   onUsage?: (usage: UsageInfo) => void,
   onResponseId?: (id: string) => void,
   wantThinking?: boolean,
-  precomputedInputTokens?: number,
+  usageHint?: CacheUsageHint,
+  onResponseMetadata?: (metadata: ResponseMetadata) => void,
 ): AsyncGenerator<string> {
   const msgId = `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
   let outputTokens = 0;
@@ -111,14 +78,17 @@ export async function* streamCodexToAnthropic(
   let contentIndex = 0;
   let textBlockStarted = false;
   let thinkingBlockStarted = false;
-  let stopReason: AnthropicMessagesResponse["stop_reason"] | undefined;
-  let stopSequence: string | null = null;
+  const functionCallIds = new Set<string>();
   const callIdsWithDeltas = new Set<string>();
-  const sseSequence: string[] = [];
+
+  const publishFunctionCallId = (callId: string): void => {
+    if (functionCallIds.has(callId)) return;
+    functionCallIds.add(callId);
+    onResponseMetadata?.({ functionCallIds: [callId] });
+  };
 
   // Helper: close an open block and advance the index
   function* closeBlock(blockType: "thinking" | "text"): Generator<string> {
-    pushSequenceEvent(sseSequence, `content_block_stop:${blockType}`);
     yield formatSSE("content_block_stop", {
       type: "content_block_stop",
       index: contentIndex,
@@ -141,7 +111,6 @@ export async function* streamCodexToAnthropic(
   // Helper: ensure a text block is open
   function* ensureTextBlock(): Generator<string> {
     if (!textBlockStarted) {
-      pushSequenceEvent(sseSequence, "content_block_start:text");
       yield formatSSE("content_block_start", {
         type: "content_block_start",
         index: contentIndex,
@@ -151,11 +120,7 @@ export async function* streamCodexToAnthropic(
     }
   }
 
-  // 0. ping (official Anthropic API sends this before message_start)
-  yield "event: ping\ndata: {}\n\n";
-
   // 1. message_start
-  pushSequenceEvent(sseSequence, "message_start");
   yield formatSSE("message_start", {
     type: "message_start",
     message: {
@@ -166,13 +131,7 @@ export async function* streamCodexToAnthropic(
       model,
       stop_reason: null,
       stop_sequence: null,
-      usage: {
-        input_tokens: precomputedInputTokens ?? 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        output_tokens: 0,
-      },
-      service_tier: "standard",
+      usage: { input_tokens: usageHint?.precomputedInputTokens ?? 0, output_tokens: 0 },
     },
   });
 
@@ -184,32 +143,7 @@ export async function* streamCodexToAnthropic(
 
     // Handle upstream error events
     if (evt.error) {
-      yield* closeThinkingIfOpen();
-      yield* ensureTextBlock();
-      pushSequenceEvent(sseSequence, "content_block_delta:text");
-      yield formatSSE("content_block_delta", {
-        type: "content_block_delta",
-        index: contentIndex,
-        delta: { type: "text_delta", text: `[Error] ${evt.error.code}: ${evt.error.message}` },
-      });
-      yield* closeBlock("text");
-      pushSequenceEvent(sseSequence, "error");
-      yield formatSSE("error", {
-        type: "error",
-        error: { type: "api_error", message: `${evt.error.code}: ${evt.error.message}` },
-      });
-      pushSequenceEvent(sseSequence, "message_stop");
-      yield formatSSE("message_stop", { type: "message_stop" });
-      logAnthropicStreamDebug({
-        model,
-        wantThinking: Boolean(wantThinking),
-        hasToolCalls,
-        sequence: sseSequence,
-        usage: inputTokens || outputTokens || cachedTokens != null
-          ? { input_tokens: inputTokens, output_tokens: outputTokens, cached_tokens: cachedTokens }
-          : undefined,
-      });
-      return;
+      throw codexApiErrorFromEvent(evt.error);
     }
 
     // Codex reasoning is intentionally dropped — the proxy cannot produce a
@@ -224,12 +158,12 @@ export async function* streamCodexToAnthropic(
     if (evt.functionCallStart) {
       hasToolCalls = true;
       hasContent = true;
+      publishFunctionCallId(evt.functionCallStart.callId);
 
       yield* closeThinkingIfOpen();
       yield* closeTextIfOpen();
 
       // Start tool_use block
-      pushSequenceEvent(sseSequence, "content_block_start:tool_use");
       yield formatSSE("content_block_start", {
         type: "content_block_start",
         index: contentIndex,
@@ -245,7 +179,6 @@ export async function* streamCodexToAnthropic(
 
     if (evt.functionCallDelta) {
       callIdsWithDeltas.add(evt.functionCallDelta.callId);
-      pushSequenceEvent(sseSequence, "content_block_delta:tool_use");
       yield formatSSE("content_block_delta", {
         type: "content_block_delta",
         index: contentIndex,
@@ -255,9 +188,9 @@ export async function* streamCodexToAnthropic(
     }
 
     if (evt.functionCallDone) {
+      publishFunctionCallId(evt.functionCallDone.callId);
       // Emit full arguments if no deltas were streamed
       if (!callIdsWithDeltas.has(evt.functionCallDone.callId)) {
-        pushSequenceEvent(sseSequence, "content_block_delta:tool_use");
         yield formatSSE("content_block_delta", {
           type: "content_block_delta",
           index: contentIndex,
@@ -265,7 +198,6 @@ export async function* streamCodexToAnthropic(
         });
       }
       // Close this tool_use block
-      pushSequenceEvent(sseSequence, "content_block_stop:tool_use");
       yield formatSSE("content_block_stop", {
         type: "content_block_stop",
         index: contentIndex,
@@ -282,7 +214,6 @@ export async function* streamCodexToAnthropic(
           yield* closeThinkingIfOpen();
           // Open a text block if not already open
           yield* ensureTextBlock();
-          pushSequenceEvent(sseSequence, "content_block_delta:text");
           yield formatSSE("content_block_delta", {
             type: "content_block_delta",
             index: contentIndex,
@@ -296,15 +227,18 @@ export async function* streamCodexToAnthropic(
         if (evt.usage) {
           inputTokens = evt.usage.input_tokens;
           outputTokens = evt.usage.output_tokens;
-          cachedTokens = evt.usage.cached_tokens;
-          onUsage?.({ input_tokens: inputTokens, output_tokens: outputTokens, cached_tokens: cachedTokens, reasoning_tokens: evt.usage.reasoning_tokens });
+          const adjusted = resolveCacheUsage(inputTokens, evt.usage.cached_tokens, usageHint);
+          cachedTokens = adjusted.cacheReadTokens || undefined;
+          onUsage?.({
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+            cached_tokens: cachedTokens,
+            reasoning_tokens: evt.usage.reasoning_tokens,
+          });
         }
-        stopReason = evt.typed.response.stop_reason as AnthropicMessagesResponse["stop_reason"];
-        stopSequence = evt.typed.response.stop_sequence ?? null;
         // Inject error text if stream completed with no content
         if (!hasContent) {
           yield* ensureTextBlock();
-          pushSequenceEvent(sseSequence, "content_block_delta:text");
           yield formatSSE("content_block_delta", {
             type: "content_block_delta",
             index: contentIndex,
@@ -321,37 +255,23 @@ export async function* streamCodexToAnthropic(
   yield* closeTextIfOpen();
 
   // 4. message_delta with stop_reason and usage
-  pushSequenceEvent(sseSequence, "message_delta");
+  // cache_creation_input_tokens: tokens not served from cache (will be cached for next turn)
+  // cache_read_input_tokens: tokens served from cache (Codex cached_tokens)
+  const { cacheReadTokens, cacheCreationTokens } = resolveCacheUsage(inputTokens, cachedTokens, usageHint);
   yield formatSSE("message_delta", {
     type: "message_delta",
-    delta: {
-      stop_reason: stopReason ?? (hasToolCalls ? "tool_use" : "end_turn"),
-      stop_sequence: stopSequence,
-    },
+    delta: { stop_reason: hasToolCalls ? "tool_use" : "end_turn" },
     usage: {
       input_tokens: inputTokens,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: cachedTokens ?? 0,
       output_tokens: outputTokens,
+      ...(cacheCreationTokens > 0 ? { cache_creation_input_tokens: cacheCreationTokens } : {}),
+      ...(cacheReadTokens > 0 ? { cache_read_input_tokens: cacheReadTokens } : {}),
     },
   });
 
   // 5. message_stop
-  pushSequenceEvent(sseSequence, "message_stop");
   yield formatSSE("message_stop", {
     type: "message_stop",
-  });
-
-  logAnthropicStreamDebug({
-    model,
-    wantThinking: Boolean(wantThinking),
-    hasToolCalls,
-    sequence: sseSequence,
-    usage: {
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      ...(cachedTokens != null ? { cached_tokens: cachedTokens } : {}),
-    },
   });
 }
 
@@ -364,7 +284,8 @@ export async function collectCodexToAnthropicResponse(
   rawResponse: Response,
   model: string,
   wantThinking?: boolean,
-  precomputedInputTokens?: number,
+  usageHint?: CacheUsageHint,
+  onResponseMetadata?: (metadata: ResponseMetadata) => void,
 ): Promise<{
   response: AnthropicMessagesResponse;
   usage: UsageInfo;
@@ -372,12 +293,12 @@ export async function collectCodexToAnthropicResponse(
 }> {
   const id = `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
   let fullText = "";
+  let fullReasoning = "";
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedTokens: number | undefined;
   let responseId: string | null = null;
-  let stopReason: AnthropicMessagesResponse["stop_reason"] | undefined;
-  let stopSequence: string | null = null;
+  const functionCallIds = new Set<string>();
 
   // Collect tool calls
   const toolUseBlocks: AnthropicContentBlock[] = [];
@@ -385,20 +306,17 @@ export async function collectCodexToAnthropicResponse(
   for await (const evt of iterateCodexEvents(codexApi, rawResponse)) {
     if (evt.responseId) responseId = evt.responseId;
     if (evt.error) {
-      throw new Error(`Codex API error: ${evt.error.code}: ${evt.error.message}`);
+      throw codexApiErrorFromEvent(evt.error);
     }
     if (evt.textDelta) fullText += evt.textDelta;
-    // Codex reasoning is intentionally dropped (see below) — don't accumulate.
+    if (evt.reasoningDelta) fullReasoning += evt.reasoningDelta;
     if (evt.usage) {
       inputTokens = evt.usage.input_tokens;
       outputTokens = evt.usage.output_tokens;
       cachedTokens = evt.usage.cached_tokens;
     }
-    if (evt.typed.type === "response.completed") {
-      stopReason = (evt.typed.response.stop_reason as AnthropicMessagesResponse["stop_reason"]) ?? stopReason;
-      stopSequence = evt.typed.response.stop_sequence ?? stopSequence;
-    }
     if (evt.functionCallDone) {
+      functionCallIds.add(evt.functionCallDone.callId);
       let parsedInput: Record<string, unknown> = {};
       try {
         parsedInput = JSON.parse(evt.functionCallDone.arguments) as Record<string, unknown>;
@@ -418,6 +336,9 @@ export async function collectCodexToAnthropicResponse(
   }
 
   const hasToolCalls = toolUseBlocks.length > 0;
+  if (functionCallIds.size > 0) {
+    onResponseMetadata?.({ functionCallIds: Array.from(functionCallIds) });
+  }
   const content: AnthropicContentBlock[] = [];
   // Codex reasoning is intentionally dropped — the proxy cannot produce a
   // valid Anthropic `thinking.signature`, so emitting a thinking block would
@@ -432,25 +353,14 @@ export async function collectCodexToAnthropicResponse(
     content.push({ type: "text", text: "" });
   }
 
-  const finalInputTokens = inputTokens || precomputedInputTokens || 0;
+  const { cacheReadTokens: cacheRead, cacheCreationTokens: cacheCreation } =
+    resolveCacheUsage(inputTokens, cachedTokens, usageHint);
   const usage: AnthropicUsage = {
-    input_tokens: finalInputTokens,
+    input_tokens: inputTokens,
     output_tokens: outputTokens,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: cachedTokens ?? 0,
+    ...(cacheCreation > 0 ? { cache_creation_input_tokens: cacheCreation } : {}),
+    ...(cacheRead > 0 ? { cache_read_input_tokens: cacheRead } : {}),
   };
-
-  logAnthropicCollectDebug({
-    model,
-    wantThinking: Boolean(wantThinking),
-    hasToolCalls,
-    contentTypes: content.map((block) => block.type),
-    usage: {
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      ...(cachedTokens != null ? { cached_tokens: cachedTokens } : {}),
-    },
-  });
 
   return {
     response: {
@@ -459,10 +369,9 @@ export async function collectCodexToAnthropicResponse(
       role: "assistant",
       content,
       model,
-      stop_reason: stopReason ?? (hasToolCalls ? "tool_use" : "end_turn"),
-      stop_sequence: stopSequence,
+      stop_reason: hasToolCalls ? "tool_use" : "end_turn",
+      stop_sequence: null,
       usage,
-      service_tier: "standard",
     },
     usage,
     responseId,
