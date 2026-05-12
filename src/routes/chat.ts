@@ -9,13 +9,22 @@ import {
   collectCodexResponse,
 } from "../translation/codex-to-openai.js";
 import { getConfig } from "../config.js";
-import { parseModelName, buildDisplayModelName, getModelAliases, getModelInfo } from "../models/model-store.js";
+import {
+  parseModelName,
+  buildDisplayModelName,
+  isRecognizedModelName,
+} from "../models/model-store.js";
+import { enqueueLogEntry } from "../logs/entry.js";
+import { getRealClientIp } from "../utils/get-real-client-ip.js";
+import { randomUUID } from "crypto";
 import {
   handleProxyRequest,
   handleDirectRequest,
   type FormatAdapter,
+  type ProxyRequest,
 } from "./shared/proxy-handler.js";
 import type { UpstreamRouter } from "../proxy/upstream-router.js";
+import { summarizeRequestForLog } from "../logs/request-summary.js";
 
 function makeOpenAIFormat(wantReasoning: boolean): FormatAdapter {
   return {
@@ -51,11 +60,6 @@ function makeOpenAIFormat(wantReasoning: boolean): FormatAdapter {
     collectTranslator: (api, response, model, tupleSchema) =>
       collectCodexResponse(api, response, model, wantReasoning, tupleSchema),
   };
-}
-
-function hasKnownCodexModel(model: string): boolean {
-  const aliases = getModelAliases();
-  return !!aliases[model] || !!getModelInfo(model);
 }
 
 function formatModelNotFound(model: string) {
@@ -106,7 +110,7 @@ export function createChatRoutes(
       });
     }
     const req = parsed.data;
-    const routeMatch = upstreamRouter?.resolveMatch(req.model) ?? (hasKnownCodexModel(req.model)
+    const routeMatch = upstreamRouter?.resolveMatch(req.model) ?? (isRecognizedModelName(req.model)
       ? { kind: "codex" as const }
       : { kind: "not-found" as const });
 
@@ -119,12 +123,27 @@ export function createChatRoutes(
     const fmt = makeOpenAIFormat(wantReasoning);
     const { codexRequest, tupleSchema } = translateToCodexRequest(req);
     const displayModel = buildDisplayModelName(parseModelName(req.model));
-    const proxyReq = {
+    const proxyReq: ProxyRequest = {
       codexRequest,
       model: displayModel,
-      isStreaming: req.stream,
+      isStreaming: req.stream ?? false,
+      clientConversationId: req.user,
       tupleSchema,
     };
+
+    const requestId = c.get("requestId") ?? randomUUID().slice(0, 8);
+    enqueueLogEntry({
+      requestId,
+      direction: "ingress",
+      method: c.req.method,
+      path: c.req.path,
+      model: req.model,
+      stream: !!req.stream,
+      request: summarizeRequestForLog("chat", req, {
+        ip: getRealClientIp(c, getConfig()?.server?.trust_proxy ?? false),
+        headers: Object.fromEntries(c.req.raw.headers.entries()),
+      }),
+    });
 
     if (routeMatch.kind === "api-key" || routeMatch.kind === "adapter") {
       const directReq = {

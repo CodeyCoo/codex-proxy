@@ -25,17 +25,21 @@ import {
   collectCodexToAnthropicResponse,
 } from "../translation/codex-to-anthropic.js";
 import { getConfig } from "../config.js";
-import {
-  parseModelName,
-  buildDisplayModelName,
-} from "../models/model-store.js";
+import { parseModelName, buildDisplayModelName } from "../models/model-store.js";
 import { countRequestInputTokens } from "../utils/tokenizer.js";
+import { enqueueLogEntry } from "../logs/entry.js";
+import { getRealClientIp } from "../utils/get-real-client-ip.js";
+import { randomUUID } from "crypto";
 import {
   handleProxyRequest,
   handleDirectRequest,
   type FormatAdapter,
+  type ResponseMetadata,
+  type UsageHint,
 } from "./shared/proxy-handler.js";
+import { extractAnthropicClientConversationId } from "./shared/anthropic-session-id.js";
 import type { UpstreamRouter, UpstreamRouteMatch } from "../proxy/upstream-router.js";
+import { summarizeRequestForLog } from "../logs/request-summary.js";
 
 function makeError(
   type: AnthropicErrorType,
@@ -90,10 +94,6 @@ const KNOWN_COUNT_TOKENS_REQUEST_KEYS = [
   "tools",
   "tool_choice",
 ];
-
-function formatModelNotFound(model: string): AnthropicErrorBody {
-  return makeError("not_found_error", `Model '${model}' not found`);
-}
 
 function formatCountTokensResponse(body: Record<string, unknown>): AnthropicMessageTokensCountResponse {
   const inputTokens = typeof body.input_tokens === "number" ? body.input_tokens : 0;
@@ -158,10 +158,36 @@ function makeAnthropicFormat(wantThinking: boolean, precomputedInputTokens?: num
       ),
     format429: (msg) => makeError("rate_limit_error", msg),
     formatError: (_status, msg) => makeError("api_error", msg),
-    streamTranslator: (api, response, model, onUsage, onResponseId, _tupleSchema) =>
-      streamCodexToAnthropic(api, response, model, onUsage, onResponseId, wantThinking, precomputedInputTokens),
-    collectTranslator: (api, response, model, _tupleSchema) =>
-      collectCodexToAnthropicResponse(api, response, model, wantThinking, precomputedInputTokens),
+    streamTranslator: (
+      api,
+      response,
+      model,
+      onUsage,
+      onResponseId,
+      _tupleSchema,
+      usageHint?: UsageHint,
+      onResponseMetadata?: (metadata: ResponseMetadata) => void,
+    ) => {
+      const hint = usageHint ?? {};
+      if (precomputedInputTokens != null) {
+        (hint as Record<string, unknown>).precomputedInputTokens = precomputedInputTokens;
+      }
+      return streamCodexToAnthropic(api, response, model, onUsage, onResponseId, wantThinking, hint, onResponseMetadata);
+    },
+    collectTranslator: (
+      api,
+      response,
+      model,
+      _tupleSchema,
+      usageHint?: UsageHint,
+      onResponseMetadata?: (metadata: ResponseMetadata) => void,
+    ) => {
+      const hint = usageHint ?? {};
+      if (precomputedInputTokens != null) {
+        (hint as Record<string, unknown>).precomputedInputTokens = precomputedInputTokens;
+      }
+      return collectCodexToAnthropicResponse(api, response, model, wantThinking, hint, onResponseMetadata);
+    },
   };
 }
 
@@ -294,22 +320,41 @@ export function createMessagesRoutes(
       }
     }
 
-    const codexRequest = translateAnthropicToCodexRequest(req);
-    const precomputedInputTokens = countRequestInputTokens(codexRequest);
+    const clientConversationId = extractAnthropicClientConversationId(
+      req,
+      c.req.header("x-claude-code-session-id"),
+    );
+
+    const codexRequest = translateAnthropicToCodexRequest(req, undefined, {
+      injectHostedWebSearch: !allowUnauthenticated,
+      mapClaudeCodeWebSearch: !allowUnauthenticated && clientConversationId !== null,
+    });
+    if (!allowUnauthenticated) {
+      codexRequest.useWebSocket = true;
+    }
     const wantThinking = req.thinking?.type === "enabled" || req.thinking?.type === "adaptive";
-    const anthropicVersion = c.req.header("anthropic-version");
-    const anthropicBeta = c.req.header("anthropic-beta");
-    const upstreamHeaders = {
-      ...(anthropicVersion ? { "anthropic-version": anthropicVersion } : {}),
-      ...(anthropicBeta ? { "anthropic-beta": anthropicBeta } : {}),
-    };
+    const precomputedInputTokens = countRequestInputTokens(codexRequest);
     const proxyReq = {
       codexRequest,
-      model: req.model, // preserve original Anthropic model name for SSE response
+      model: buildDisplayModelName(parseModelName(req.model)),
       isStreaming: req.stream,
-      upstreamHeaders: Object.keys(upstreamHeaders).length > 0 ? upstreamHeaders : undefined,
+      clientConversationId: clientConversationId ?? undefined,
     };
     const fmt = makeAnthropicFormat(wantThinking, precomputedInputTokens);
+
+    const requestId = c.get("requestId") ?? randomUUID().slice(0, 8);
+    enqueueLogEntry({
+      requestId,
+      direction: "ingress",
+      method: c.req.method,
+      path: c.req.path,
+      model: req.model,
+      stream: !!req.stream,
+      request: summarizeRequestForLog("messages", req, {
+        ip: getRealClientIp(c, getConfig()?.server?.trust_proxy ?? false),
+        headers: Object.fromEntries(c.req.raw.headers.entries()),
+      }),
+    });
 
     if (routeMatch?.kind === "api-key" || routeMatch?.kind === "adapter") {
       const directReq = {

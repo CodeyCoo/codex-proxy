@@ -7,7 +7,7 @@
 
 import { Hono } from "hono";
 import type { AccountPool } from "../../auth/account-pool.js";
-import type { UsageStatsStore } from "../../auth/usage-stats.js";
+import type { UsageHistoryRange, UsageStatsStore } from "../../auth/usage-stats.js";
 
 export function createUsageStatsRoutes(
   pool: AccountPool,
@@ -21,13 +21,32 @@ export function createUsageStatsRoutes(
 
   app.get("/admin/usage-stats/history", (c) => {
     const granularity = c.req.query("granularity") ?? "hourly";
-    if (granularity !== "raw" && granularity !== "hourly" && granularity !== "daily") {
+    if (
+      granularity !== "raw" &&
+      granularity !== "five_min" &&
+      granularity !== "hourly" &&
+      granularity !== "daily"
+    ) {
       c.status(400);
-      return c.json({ error: "Invalid granularity. Must be raw, hourly, or daily." });
+      return c.json({ error: "Invalid granularity. Must be raw, five_min, hourly, or daily." });
     }
 
     const hoursStr = c.req.query("hours") ?? "24";
-    const hours = Math.min(Math.max(1, parseInt(hoursStr, 10) || 24), 168);
+    let hours: UsageHistoryRange;
+    if (hoursStr === "all") {
+      if (granularity === "raw") {
+        c.status(400);
+        return c.json({ error: "raw granularity cannot be used with hours=all." });
+      }
+      hours = "all";
+    } else {
+      const parsedHours = Number(hoursStr);
+      if (!Number.isInteger(parsedHours) || parsedHours < 1) {
+        c.status(400);
+        return c.json({ error: "hours must be a positive integer or all." });
+      }
+      hours = parsedHours;
+    }
 
     const data_points = statsStore.getHistory(hours, granularity);
 
