@@ -46,6 +46,8 @@ describe("ConfigSchema", () => {
     expect(result.quota.refresh_interval_minutes).toBe(5);
     expect(result.quota.warning_thresholds.primary).toEqual([80, 90]);
     expect(result.quota.skip_exhausted).toBe(true);
+    expect(result.usage_stats.snapshot_interval_minutes).toBe(5);
+    expect(result.usage_stats.history_retention_days).toBeNull();
     expect(result.update.auto_update).toBe(true);
     expect(result.update.show_update_dialog).toBe(false);
     expect(result.update.allow_prerelease).toBe(false);

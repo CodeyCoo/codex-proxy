@@ -6,9 +6,10 @@
 
 import type { UpstreamAdapter } from "../../proxy/upstream-adapter.js";
 import { CodexApiError } from "../../proxy/codex-types.js";
-import type { FormatAdapter, ResponseMetadata, UsageHint } from "./proxy-handler.js";
+import type { FormatAdapter, ResponseMetadata, UsageHint } from "./proxy-handler-types.js";
 import type { UsageInfo } from "../../translation/codex-event-extractor.js";
 import { debugDump, debugDumpEnabled } from "../../utils/debug-dump.js";
+import { recordStreamCloseEvent } from "../../logs/stream-close-event.js";
 
 /** Minimal subset of Hono's StreamingApi that we actually use. */
 export interface StreamWriter {
@@ -19,6 +20,25 @@ export interface StreamWriter {
 export interface StreamDiagnostics {
   requestId?: string;
   tag?: string;
+  provider?: string;
+  path?: string;
+  accountEntryId?: string;
+  variantHash?: string;
+  abortSignal?: AbortSignal;
+}
+
+export interface StreamResponseOptions {
+  writer: StreamWriter;
+  api: UpstreamAdapter;
+  response: Response;
+  model: string;
+  adapter: FormatAdapter;
+  onUsage: (u: UsageInfo) => void;
+  tupleSchema?: Record<string, unknown> | null;
+  onResponseId?: (id: string) => void;
+  usageHint?: UsageHint;
+  onResponseMetadata?: (metadata: ResponseMetadata) => void;
+  diagnostics?: StreamDiagnostics;
 }
 
 interface WrittenStreamTrace {
@@ -94,10 +114,11 @@ function streamErrorStatus(err: unknown): number {
  * Handles: client disconnect (stops reading upstream), stream errors
  * (sends error SSE event before closing).
  */
+export async function streamResponse(options: StreamResponseOptions): Promise<void>;
 export async function streamResponse(
-  s: StreamWriter,
+  writer: StreamWriter,
   api: UpstreamAdapter,
-  rawResponse: Response,
+  response: Response,
   model: string,
   adapter: FormatAdapter,
   onUsage: (u: UsageInfo) => void,
@@ -106,24 +127,96 @@ export async function streamResponse(
   usageHint?: UsageHint,
   onResponseMetadata?: (metadata: ResponseMetadata) => void,
   diagnostics?: StreamDiagnostics,
+): Promise<void>;
+export async function streamResponse(
+  optionsOrWriter: StreamResponseOptions | StreamWriter,
+  apiArg?: UpstreamAdapter,
+  responseArg?: Response,
+  modelArg?: string,
+  adapterArg?: FormatAdapter,
+  onUsageArg?: (u: UsageInfo) => void,
+  tupleSchemaArg?: Record<string, unknown> | null,
+  onResponseIdArg?: (id: string) => void,
+  usageHintArg?: UsageHint,
+  onResponseMetadataArg?: (metadata: ResponseMetadata) => void,
+  diagnosticsArg?: StreamDiagnostics,
 ): Promise<void> {
+  const options: StreamResponseOptions =
+    "writer" in optionsOrWriter
+      ? optionsOrWriter
+      : {
+          writer: optionsOrWriter,
+          api: apiArg!,
+          response: responseArg!,
+          model: modelArg!,
+          adapter: adapterArg!,
+          onUsage: onUsageArg ?? (() => {}),
+          tupleSchema: tupleSchemaArg,
+          onResponseId: onResponseIdArg,
+          usageHint: usageHintArg,
+          onResponseMetadata: onResponseMetadataArg,
+          diagnostics: diagnosticsArg,
+        };
+  const {
+    writer,
+    api,
+    response,
+    model,
+    adapter,
+    onUsage,
+    tupleSchema,
+    onResponseId,
+    usageHint,
+    onResponseMetadata,
+    diagnostics,
+  } = options;
   const written: WrittenStreamTrace = {
     chunks: 0,
     bytes: 0,
     lastEvent: null,
     sawTerminal: false,
   };
+  // Diagnostic context passed into adapter-internal premature-close records
+  // (e.g. streamPassthrough in responses.ts). The adapter is free to ignore
+  // it; carrying it through here means audit entries land on the real
+  // requestId/account/variantHash instead of the synthetic fallback.
+  const streamContext = {
+    requestId: diagnostics?.requestId,
+    tag: diagnostics?.tag ?? adapter.tag,
+    provider: diagnostics?.provider,
+    path: diagnostics?.path,
+    model,
+    accountEntryId: diagnostics?.accountEntryId,
+    variantHash: diagnostics?.variantHash,
+  };
   try {
-    for await (const chunk of adapter.streamTranslator(
-      api,
-      rawResponse,
-      model,
-      onUsage,
-      onResponseId ?? (() => {}),
-      tupleSchema,
-      usageHint,
-      onResponseMetadata,
-    )) {
+    const translator = adapter.streamTranslator as unknown as (
+      (...args: unknown[]) => AsyncGenerator<string>
+    );
+    const streamChunks = translator.length > 1
+      ? translator(
+          api,
+          response,
+          model,
+          onUsage,
+          onResponseId ?? (() => {}),
+          tupleSchema,
+          usageHint,
+          onResponseMetadata,
+          streamContext,
+        )
+      : translator({
+          api,
+          response,
+          model,
+          onUsage,
+          onResponseId: onResponseId ?? (() => {}),
+          tupleSchema,
+          usageHint,
+          onResponseMetadata,
+          streamContext,
+        });
+    for await (const chunk of streamChunks) {
       const chunkTrace = inspectStreamChunk(chunk);
       if (debugDumpEnabled()) {
         debugDump("upstream-chunk", {
@@ -135,7 +228,7 @@ export async function streamResponse(
         });
       }
       try {
-        await s.write(chunk);
+        await writer.write(chunk);
         applyWrittenChunkTrace(written, chunkTrace);
       } catch (writeErr) {
         const errMsg = writeErr instanceof Error ? writeErr.message : String(writeErr);
@@ -149,6 +242,21 @@ export async function streamResponse(
             ` failed_chunk_terminal=${chunkTrace.terminal}` +
             ` err=${errMsg}`,
         );
+        recordStreamCloseEvent({
+          kind: "client-write-failed",
+          requestId: diagnostics?.requestId ?? null,
+          tag: diagnostics?.tag ?? adapter.tag ?? null,
+          provider: diagnostics?.provider ?? null,
+          path: diagnostics?.path ?? null,
+          model,
+          accountEntryId: diagnostics?.accountEntryId ?? null,
+          variantHash: diagnostics?.variantHash ?? null,
+          writtenChunks: written.chunks,
+          writtenBytes: written.bytes,
+          lastSentEvent: written.lastEvent,
+          sentTerminal: written.sawTerminal,
+          detail: errMsg,
+        });
         // Client disconnected mid-stream — stop reading upstream
         return;
       }
@@ -164,6 +272,9 @@ export async function streamResponse(
       });
     }
   } catch (err) {
+    if (diagnostics?.abortSignal?.aborted) {
+      return;
+    }
     const errMsg = err instanceof Error ? err.message : "Stream interrupted";
     const errStatus = err instanceof CodexApiError ? err.status : "?";
     const errBody = err instanceof CodexApiError ? err.body : undefined;
@@ -190,9 +301,25 @@ export async function streamResponse(
         ` msg=${errMsg}` +
         (errBody ? ` body=${errBody.slice(0, 1000)}` : ""),
     );
+    recordStreamCloseEvent({
+      kind: "upstream-error",
+      requestId: diagnostics?.requestId ?? null,
+      tag: diagnostics?.tag ?? adapter.tag ?? null,
+      provider: diagnostics?.provider ?? null,
+      path: diagnostics?.path ?? null,
+      model,
+      accountEntryId: diagnostics?.accountEntryId ?? null,
+      variantHash: diagnostics?.variantHash ?? null,
+      writtenChunks: written.chunks,
+      writtenBytes: written.bytes,
+      lastSentEvent: written.lastEvent,
+      sentTerminal: written.sawTerminal,
+      upstreamStatus: typeof errStatus === "number" ? errStatus : null,
+      detail: errMsg,
+    });
     // Send error SSE event to client before closing
     try {
-      await s.write(
+      await writer.write(
         adapter.formatStreamError?.(responseStatus, errMsg) ??
           `data: ${JSON.stringify({ error: { message: errMsg, type: "stream_error" } })}\n\n`,
       );

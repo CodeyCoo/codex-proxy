@@ -56,6 +56,9 @@ server:
 session:
   ttl_minutes: 60
   cleanup_interval_minutes: 5
+usage_stats:
+  snapshot_interval_minutes: 5
+  history_retention_days: null
 `;
 
 const FINGERPRINT_YAML = `
@@ -93,6 +96,7 @@ describe("config", () => {
     expect(config.api.base_url).toBe("https://chatgpt.com/backend-api");
     expect(config.server.port).toBe(8080);
     expect(config.model.default).toBe("gpt-5.4");
+    expect(config.usage_stats.snapshot_interval_minutes).toBe(5);
     expect(config.usage_stats.history_retention_days).toBeNull();
   });
 

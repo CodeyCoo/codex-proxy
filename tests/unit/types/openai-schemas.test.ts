@@ -126,4 +126,102 @@ describe("ChatCompletionRequestSchema", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it("normalizes flat function tools", () => {
+    const result = ChatCompletionRequestSchema.safeParse({
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "Use a tool." }],
+      tools: [{
+        type: "function",
+        name: "lookup",
+        description: "Lookup a value",
+        parameters: { type: "object", properties: { q: { type: "string" } } },
+      }],
+      tool_choice: { type: "function", name: "lookup" },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tools?.[0]).toEqual({
+        type: "function",
+        function: {
+          name: "lookup",
+          description: "Lookup a value",
+          parameters: { type: "object", properties: { q: { type: "string" } } },
+        },
+      });
+      expect(result.data.tool_choice).toEqual({ type: "function", function: { name: "lookup" } });
+    }
+  });
+
+  it("normalizes custom tools as function-compatible tools", () => {
+    const result = ChatCompletionRequestSchema.safeParse({
+      model: "gpt-5.4",
+      messages: [{ role: "user", content: "Use a custom tool." }],
+      tools: [{
+        type: "custom",
+        name: "run_shell",
+        description: "Run a shell command",
+        input_schema: { type: "object", properties: { cmd: { type: "string" } } },
+      }],
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tools?.[0]).toEqual({
+        type: "function",
+        function: {
+          name: "run_shell",
+          description: "Run a shell command",
+          parameters: { type: "object", properties: { cmd: { type: "string" } } },
+        },
+      });
+    }
+  });
+
+  it("normalizes Responses-style input string into chat messages", () => {
+    const result = ChatCompletionRequestSchema.safeParse({
+      model: "gpt-5.4",
+      instructions: "Be concise.",
+      input: "Hello",
+      reasoning: { effort: "high" },
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.reasoning_effort).toBe("high");
+      expect(result.data.messages).toEqual([
+        { role: "system", content: "Be concise." },
+        { role: "user", content: "Hello" },
+      ]);
+    }
+  });
+
+  it("normalizes Responses-style input items", () => {
+    const result = ChatCompletionRequestSchema.safeParse({
+      model: "gpt-5.4",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Call it" }] },
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: { q: "x" } },
+        { type: "function_call_output", call_id: "call_1", output: "done" },
+      ],
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.messages).toEqual([
+        { role: "user", content: [{ type: "text", text: "Call it" }] },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_1",
+            type: "function",
+            function: { name: "lookup", arguments: "{\"q\":\"x\"}" },
+          }],
+        },
+        { role: "tool", content: "done", tool_call_id: "call_1" },
+      ]);
+    }
+  });
 });

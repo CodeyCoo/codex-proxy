@@ -158,30 +158,28 @@ function makeAnthropicFormat(wantThinking: boolean, precomputedInputTokens?: num
       ),
     format429: (msg) => makeError("rate_limit_error", msg),
     formatError: (_status, msg) => makeError("api_error", msg),
-    streamTranslator: (
+    streamTranslator: ({
       api,
       response,
       model,
       onUsage,
       onResponseId,
-      _tupleSchema,
-      usageHint?: UsageHint,
-      onResponseMetadata?: (metadata: ResponseMetadata) => void,
-    ) => {
+      usageHint,
+      onResponseMetadata,
+    }) => {
       const hint = usageHint ?? {};
       if (precomputedInputTokens != null) {
         (hint as Record<string, unknown>).precomputedInputTokens = precomputedInputTokens;
       }
       return streamCodexToAnthropic(api, response, model, onUsage, onResponseId, wantThinking, hint, onResponseMetadata);
     },
-    collectTranslator: (
+    collectTranslator: ({
       api,
       response,
       model,
-      _tupleSchema,
-      usageHint?: UsageHint,
-      onResponseMetadata?: (metadata: ResponseMetadata) => void,
-    ) => {
+      usageHint,
+      onResponseMetadata,
+    }) => {
       const hint = usageHint ?? {};
       if (precomputedInputTokens != null) {
         (hint as Record<string, unknown>).precomputedInputTokens = precomputedInputTokens;

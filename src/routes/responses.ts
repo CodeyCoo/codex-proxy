@@ -35,6 +35,10 @@ import { handleCodexApiError } from "./shared/proxy-error-handler.js";
 import { withRetry } from "../utils/retry.js";
 import { extractCodexError } from "../types/codex-events.js";
 import {
+  recordStreamCloseEvent,
+  type StreamCloseContextBase,
+} from "../logs/stream-close-event.js";
+import {
   extractOpenAISubagentFromMetadata,
   normalizeOpenAISubagent,
   OPENAI_SUBAGENT_HEADER,
@@ -198,10 +202,11 @@ export function extractImageGenUsage(response: Record<string, unknown>): { image
 export async function* streamPassthrough(
   api: UpstreamAdapter,
   response: Response,
-  _model: string,
+  model: string,
   onUsage: (u: { input_tokens: number; output_tokens: number; cached_tokens?: number; image_input_tokens?: number; image_output_tokens?: number }) => void,
   onResponseId: (id: string) => void,
   tupleSchema?: Record<string, unknown> | null,
+  streamContext?: StreamCloseContextBase,
 ): AsyncGenerator<string> {
   // When tupleSchema is present, buffer text deltas and reconvert on completion.
   // This means the client receives zero incremental text — all text arrives at once
@@ -223,6 +228,18 @@ export async function* streamPassthrough(
         console.warn(
           `[Responses] premature stream close before terminal event responseId=${responseId ?? "unknown"}: ${detail}`,
         );
+        recordStreamCloseEvent({
+          kind: "upstream-premature",
+          tag: streamContext?.tag ?? "Responses",
+          requestId: streamContext?.requestId,
+          provider: streamContext?.provider,
+          path: streamContext?.path,
+          model: streamContext?.model ?? model,
+          accountEntryId: streamContext?.accountEntryId,
+          variantHash: streamContext?.variantHash,
+          responseId,
+          detail,
+        });
         yield buildPrematureCloseFailedEvent(responseId, detail);
         return;
       }
@@ -313,6 +330,17 @@ export async function* streamPassthrough(
     console.warn(
       `[Responses] premature stream close before terminal event responseId=${responseId ?? "unknown"}`,
     );
+    recordStreamCloseEvent({
+      kind: "upstream-premature",
+      tag: streamContext?.tag ?? "Responses",
+      requestId: streamContext?.requestId,
+      provider: streamContext?.provider,
+      path: streamContext?.path,
+      model: streamContext?.model ?? model,
+      accountEntryId: streamContext?.accountEntryId,
+      variantHash: streamContext?.variantHash,
+      responseId,
+    });
     yield buildPrematureCloseFailedEvent(responseId);
   }
 }
@@ -456,9 +484,9 @@ const PASSTHROUGH_FORMAT: FormatAdapter = {
     },
   }),
   formatStreamError: (status, msg) => buildResponsesStreamError(status, msg),
-  streamTranslator: (api, response, model, onUsage, onResponseId, tupleSchema) =>
-    streamPassthrough(api, response, model, onUsage, onResponseId, tupleSchema),
-  collectTranslator: (api, response, model, tupleSchema) =>
+  streamTranslator: ({ api, response, model, onUsage, onResponseId, tupleSchema, streamContext }) =>
+    streamPassthrough(api, response, model, onUsage, onResponseId, tupleSchema, streamContext),
+  collectTranslator: ({ api, response, model, tupleSchema }) =>
     collectPassthrough(api, response, model, tupleSchema),
 };
 

@@ -12,6 +12,7 @@ import { logger } from "./middleware/logger.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { dashboardAuth } from "./middleware/dashboard-auth.js";
 import { logCapture } from "./middleware/log-capture.js";
+import { cors } from "./middleware/cors.js";
 
 import type { UpstreamAdapter } from "./proxy/upstream-adapter.js";
 import { createAuthRoutes } from "./routes/auth.js";
@@ -122,6 +123,7 @@ export async function startServer(options?: StartOptions): Promise<ServerHandle>
   app.use("*", requestId);
   app.use("*", logger);
   app.use("*", errorHandler);
+  app.use("*", cors);
   app.use("*", dashboardAuth);
   app.use("*", logCapture);
 

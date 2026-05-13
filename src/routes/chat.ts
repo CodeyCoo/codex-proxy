@@ -55,9 +55,9 @@ function makeOpenAIFormat(wantReasoning: boolean): FormatAdapter {
         code: "codex_api_error",
       },
     }),
-    streamTranslator: (api, response, model, onUsage, onResponseId, tupleSchema) =>
+    streamTranslator: ({ api, response, model, onUsage, onResponseId, tupleSchema }) =>
       streamCodexToOpenAI(api, response, model, onUsage, onResponseId, wantReasoning, tupleSchema),
-    collectTranslator: (api, response, model, tupleSchema) =>
+    collectTranslator: ({ api, response, model, tupleSchema }) =>
       collectCodexResponse(api, response, model, wantReasoning, tupleSchema),
   };
 }
