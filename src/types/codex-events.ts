@@ -125,7 +125,14 @@ export interface CodexOutputItemDoneEvent {
     id?: string;
     call_id?: string;
     name?: string;
-    arguments?: string;
+    arguments?: unknown;
+    input?: unknown;
+    action?: unknown;
+    status?: string;
+    namespace?: string;
+    execution?: string;
+    result?: string;
+    revised_prompt?: string;
     content?: unknown[];
     actions?: unknown[];
     [key: string]: unknown;
@@ -220,6 +227,16 @@ function firstString(...values: unknown[]): string | undefined {
     if (typeof value === "string" && value.length > 0) return value;
   }
   return undefined;
+}
+
+function copyIfPresent(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  key: string,
+): void {
+  if (Object.prototype.hasOwnProperty.call(source, key)) {
+    target[key] = source[key];
+  }
 }
 
 function getErrorRecord(data: unknown): Record<string, unknown> | undefined {
@@ -479,18 +496,21 @@ export function parseCodexEvent(evt: CodexSSEEvent): TypedCodexEvent {
     }
     case "response.output_item.done": {
       if (isRecord(data) && isRecord(data.item)) {
+        const item: CodexOutputItemDoneEvent["item"] = {
+          type: typeof data.item.type === "string" ? data.item.type : "unknown",
+          ...(typeof data.item.id === "string" ? { id: data.item.id } : {}),
+          ...(typeof data.item.call_id === "string" ? { call_id: data.item.call_id } : {}),
+          ...(typeof data.item.name === "string" ? { name: data.item.name } : {}),
+          ...(Array.isArray(data.item.content) ? { content: data.item.content } : {}),
+          ...(Array.isArray(data.item.actions) ? { actions: data.item.actions } : {}),
+        };
+        for (const key of ["arguments", "input", "action", "status", "namespace", "execution", "result", "revised_prompt"]) {
+          copyIfPresent(item, data.item, key);
+        }
         return {
           type: "response.output_item.done",
           outputIndex: typeof data.output_index === "number" ? data.output_index : 0,
-          item: {
-            type: typeof data.item.type === "string" ? data.item.type : "unknown",
-            ...(typeof data.item.id === "string" ? { id: data.item.id } : {}),
-            ...(typeof data.item.call_id === "string" ? { call_id: data.item.call_id } : {}),
-            ...(typeof data.item.name === "string" ? { name: data.item.name } : {}),
-            ...(typeof data.item.arguments === "string" ? { arguments: data.item.arguments } : {}),
-            ...(Array.isArray(data.item.content) ? { content: data.item.content } : {}),
-            ...(Array.isArray(data.item.actions) ? { actions: data.item.actions } : {}),
-          },
+          item,
         };
       }
       return { type: "unknown", raw: data };

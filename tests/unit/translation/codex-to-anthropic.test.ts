@@ -55,6 +55,79 @@ function parseSSEEvents(chunks: string[]): Array<{ event: string; data: Record<s
   });
 }
 
+function doneOnlyFunctionCallStream(): ExtractedEvent[] {
+  return [
+    { typed: { type: "response.created", response: { id: "resp_done_tool" } }, responseId: "resp_done_tool" },
+    {
+      typed: {
+        type: "response.output_item.done",
+        outputIndex: 0,
+        item: {
+          type: "function_call",
+          id: "item_call_done",
+          call_id: "call_done",
+          name: "search",
+          arguments: '{"q":"codex"}',
+        },
+      },
+      functionCallDone: {
+        callId: "call_done",
+        name: "search",
+        arguments: '{"q":"codex"}',
+      },
+    },
+    {
+      typed: {
+        type: "response.completed",
+        response: { id: "resp_done_tool", usage: { input_tokens: 12, output_tokens: 7 } },
+      },
+      responseId: "resp_done_tool",
+      usage: { input_tokens: 12, output_tokens: 7 },
+    },
+  ];
+}
+
+function messageDoneOnlyStream(): ExtractedEvent[] {
+  return [
+    { typed: { type: "response.created", response: { id: "resp_done_msg" } }, responseId: "resp_done_msg" },
+    {
+      typed: {
+        type: "response.output_item.done",
+        outputIndex: 0,
+        item: {
+          type: "message",
+          id: "msg_item",
+          content: [{ type: "output_text", text: "done-only text" }],
+        },
+      },
+      messageText: "done-only text",
+    },
+    {
+      typed: {
+        type: "response.completed",
+        response: { id: "resp_done_msg", usage: { input_tokens: 8, output_tokens: 4 } },
+      },
+      responseId: "resp_done_msg",
+      usage: { input_tokens: 8, output_tokens: 4 },
+    },
+  ];
+}
+
+function incompleteTextStream(): ExtractedEvent[] {
+  return [
+    { typed: { type: "response.created", response: { id: "resp_incomplete" } }, responseId: "resp_incomplete" },
+    { typed: { type: "response.output_text.delta", delta: "partial" }, textDelta: "partial" },
+    {
+      typed: {
+        type: "response.incomplete",
+        response: { id: "resp_incomplete", usage: { input_tokens: 20, output_tokens: 3 } },
+      },
+      responseId: "resp_incomplete",
+      usage: { input_tokens: 20, output_tokens: 3 },
+    },
+  ];
+}
+
 describe("streamCodexToAnthropic", () => {
   it("emits message_start as first event", async () => {
     const chunks = await collectStreamOutput(simpleTextStream());
@@ -111,6 +184,37 @@ describe("streamCodexToAnthropic", () => {
     expect((msgDelta?.data.delta as Record<string, unknown>)?.stop_reason).toBe("end_turn");
   });
 
+  it("emits tool_use for done-only function_call output items", async () => {
+    const chunks = await collectStreamOutput(doneOnlyFunctionCallStream());
+    const events = parseSSEEvents(chunks);
+    const toolStart = events.find(
+      (e) => e.event === "content_block_start" && (e.data.content_block as Record<string, unknown>)?.type === "tool_use",
+    );
+    expect(toolStart).toBeDefined();
+    expect((toolStart!.data.content_block as Record<string, unknown>).id).toBe("call_done");
+    const jsonDelta = events.find(
+      (e) => e.event === "content_block_delta" && (e.data.delta as Record<string, unknown>)?.type === "input_json_delta",
+    );
+    expect((jsonDelta!.data.delta as Record<string, unknown>).partial_json).toBe('{"q":"codex"}');
+  });
+
+  it("emits text for done-only message output items", async () => {
+    const chunks = await collectStreamOutput(messageDoneOnlyStream());
+    const events = parseSSEEvents(chunks);
+    const textDelta = events.find(
+      (e) => e.event === "content_block_delta" && (e.data.delta as Record<string, unknown>)?.type === "text_delta",
+    );
+    expect((textDelta!.data.delta as Record<string, unknown>).text).toBe("done-only text");
+  });
+
+  it("maps response.incomplete to max_tokens stop_reason", async () => {
+    const chunks = await collectStreamOutput(incompleteTextStream());
+    const events = parseSSEEvents(chunks);
+    const msgDelta = events.find((e) => e.event === "message_delta");
+    expect((msgDelta!.data.delta as Record<string, unknown>).stop_reason).toBe("max_tokens");
+    expect((msgDelta!.data.usage as Record<string, unknown>).output_tokens).toBe(3);
+  });
+
   it("throws CodexApiError on upstream error events", async () => {
     await expect(collectStreamOutput(errorStream()))
       .rejects.toMatchObject({ status: 429 });
@@ -149,6 +253,28 @@ describe("collectCodexToAnthropicResponse", () => {
     expect(response.stop_reason).toBe("tool_use");
     const toolBlock = response.content.find((b) => b.type === "tool_use");
     expect(toolBlock).toBeDefined();
+  });
+
+  it("collects done-only function_call output items", async () => {
+    mockEvents = doneOnlyFunctionCallStream();
+    const { response } = await collectCodexToAnthropicResponse(
+      fakeCodexApi, fakeResponse, "gpt-5.4",
+    );
+    const toolBlock = response.content.find((b) => b.type === "tool_use");
+    expect(toolBlock).toMatchObject({
+      type: "tool_use",
+      id: "call_done",
+      name: "search",
+      input: { q: "codex" },
+    });
+  });
+
+  it("collects done-only message output items", async () => {
+    mockEvents = messageDoneOnlyStream();
+    const { response } = await collectCodexToAnthropicResponse(
+      fakeCodexApi, fakeResponse, "gpt-5.4",
+    );
+    expect(response.content[0]).toMatchObject({ type: "text", text: "done-only text" });
   });
 
   it("throws on error", async () => {

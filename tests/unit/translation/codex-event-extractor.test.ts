@@ -337,6 +337,50 @@ describe("parseCodexEvent — function call events", () => {
       expect(typed.item.arguments).toBe('{"q":"test"}');
     }
   });
+
+  it("preserves custom_tool_call input from output_item.done", () => {
+    const raw: CodexSSEEvent = {
+      event: "response.output_item.done",
+      data: {
+        output_index: 0,
+        item: {
+          type: "custom_tool_call",
+          id: "ct_1",
+          call_id: "call_custom",
+          name: "apply_patch",
+          input: "*** Begin Patch\n*** End Patch",
+        },
+      },
+    };
+    const typed = parseCodexEvent(raw);
+    expect(typed.type).toBe("response.output_item.done");
+    if (typed.type === "response.output_item.done") {
+      expect(typed.item.type).toBe("custom_tool_call");
+      expect(typed.item.input).toBe("*** Begin Patch\n*** End Patch");
+    }
+  });
+
+  it("preserves local_shell_call action from output_item.done", () => {
+    const raw: CodexSSEEvent = {
+      event: "response.output_item.done",
+      data: {
+        output_index: 0,
+        item: {
+          type: "local_shell_call",
+          id: "shell_1",
+          call_id: "call_shell",
+          status: "completed",
+          action: { type: "exec", command: ["ls", "-la"] },
+        },
+      },
+    };
+    const typed = parseCodexEvent(raw);
+    expect(typed.type).toBe("response.output_item.done");
+    if (typed.type === "response.output_item.done") {
+      expect(typed.item.status).toBe("completed");
+      expect(typed.item.action).toEqual({ type: "exec", command: ["ls", "-la"] });
+    }
+  });
 });
 
 // ── Error and lifecycle events ───────────────────────────────────
@@ -566,5 +610,67 @@ describe("iterateCodexEvents — unregistered item_id fallback", () => {
     expect(incompleteEvt).toBeDefined();
     expect(incompleteEvt!.usage!.input_tokens).toBe(100);
     expect(incompleteEvt!.usage!.output_tokens).toBe(30);
+  });
+
+  it("extracts done-only function_call from output_item.done", async () => {
+    const sse =
+      sseChunk("response.created", { response: { id: "resp_1" } }) +
+      sseChunk("response.output_item.done", {
+        output_index: 0,
+        item: {
+          type: "function_call",
+          id: "fc_1",
+          call_id: "call_1",
+          name: "search",
+          arguments: '{"q":"test"}',
+        },
+      }) +
+      sseChunk("response.completed", { response: { id: "resp_1" } });
+
+    const api = new CodexApi("test-token", null);
+    const response = mockResponse(sse);
+
+    const events: ExtractedEvent[] = [];
+    for await (const evt of iterateCodexEvents(api, response)) {
+      events.push(evt);
+    }
+
+    const doneEvt = events.find((e) => e.functionCallDone);
+    expect(doneEvt!.functionCallDone).toEqual({
+      callId: "call_1",
+      name: "search",
+      arguments: '{"q":"test"}',
+    });
+  });
+
+  it("wraps custom_tool_call free-form input as valid JSON", async () => {
+    const sse =
+      sseChunk("response.created", { response: { id: "resp_1" } }) +
+      sseChunk("response.output_item.done", {
+        output_index: 0,
+        item: {
+          type: "custom_tool_call",
+          id: "ct_1",
+          call_id: "call_patch",
+          name: "apply_patch",
+          input: "raw patch",
+        },
+      }) +
+      sseChunk("response.completed", { response: { id: "resp_1" } });
+
+    const api = new CodexApi("test-token", null);
+    const response = mockResponse(sse);
+
+    const events: ExtractedEvent[] = [];
+    for await (const evt of iterateCodexEvents(api, response)) {
+      events.push(evt);
+    }
+
+    const doneEvt = events.find((e) => e.functionCallDone);
+    expect(doneEvt!.functionCallDone).toEqual({
+      callId: "call_patch",
+      name: "apply_patch",
+      arguments: '{"input":"raw patch"}',
+    });
   });
 });

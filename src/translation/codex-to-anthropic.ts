@@ -29,6 +29,10 @@ interface ResponseMetadata {
   functionCallIds?: string[];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function resolveCacheUsage(
   inputTokens: number,
   cachedTokens: number | undefined,
@@ -78,8 +82,12 @@ export async function* streamCodexToAnthropic(
   let contentIndex = 0;
   let textBlockStarted = false;
   let thinkingBlockStarted = false;
+  let activeToolCallId: string | null = null;
+  let sawTextDelta = false;
+  let stopReason: AnthropicMessagesResponse["stop_reason"] = "end_turn";
   const functionCallIds = new Set<string>();
   const callIdsWithDeltas = new Set<string>();
+  const closedToolCallIds = new Set<string>();
 
   const publishFunctionCallId = (callId: string): void => {
     if (functionCallIds.has(callId)) return;
@@ -108,8 +116,21 @@ export async function* streamCodexToAnthropic(
     if (textBlockStarted) yield* closeBlock("text");
   }
 
+  function* closeToolBlockIfOpen(): Generator<string> {
+    if (activeToolCallId) {
+      yield formatSSE("content_block_stop", {
+        type: "content_block_stop",
+        index: contentIndex,
+      });
+      closedToolCallIds.add(activeToolCallId);
+      activeToolCallId = null;
+      contentIndex++;
+    }
+  }
+
   // Helper: ensure a text block is open
   function* ensureTextBlock(): Generator<string> {
+    yield* closeToolBlockIfOpen();
     if (!textBlockStarted) {
       yield formatSSE("content_block_start", {
         type: "content_block_start",
@@ -118,6 +139,28 @@ export async function* streamCodexToAnthropic(
       });
       textBlockStarted = true;
     }
+  }
+
+  function* ensureToolBlock(callId: string, name: string): Generator<string> {
+    if (activeToolCallId === callId) return;
+    yield* closeThinkingIfOpen();
+    yield* closeTextIfOpen();
+    yield* closeToolBlockIfOpen();
+    hasToolCalls = true;
+    hasContent = true;
+    stopReason = "tool_use";
+    publishFunctionCallId(callId);
+    yield formatSSE("content_block_start", {
+      type: "content_block_start",
+      index: contentIndex,
+      content_block: {
+        type: "tool_use",
+        id: callId,
+        name: name || "unknown",
+        input: {},
+      },
+    });
+    activeToolCallId = callId;
   }
 
   // 1. message_start
@@ -156,28 +199,12 @@ export async function* streamCodexToAnthropic(
 
     // Handle function call start → close open blocks, open tool_use block
     if (evt.functionCallStart) {
-      hasToolCalls = true;
-      hasContent = true;
-      publishFunctionCallId(evt.functionCallStart.callId);
-
-      yield* closeThinkingIfOpen();
-      yield* closeTextIfOpen();
-
-      // Start tool_use block
-      yield formatSSE("content_block_start", {
-        type: "content_block_start",
-        index: contentIndex,
-        content_block: {
-          type: "tool_use",
-          id: evt.functionCallStart.callId,
-          name: evt.functionCallStart.name,
-          input: {},
-        },
-      });
+      yield* ensureToolBlock(evt.functionCallStart.callId, evt.functionCallStart.name);
       continue;
     }
 
     if (evt.functionCallDelta) {
+      yield* ensureToolBlock(evt.functionCallDelta.callId, "unknown");
       callIdsWithDeltas.add(evt.functionCallDelta.callId);
       yield formatSSE("content_block_delta", {
         type: "content_block_delta",
@@ -188,7 +215,11 @@ export async function* streamCodexToAnthropic(
     }
 
     if (evt.functionCallDone) {
+      if (closedToolCallIds.has(evt.functionCallDone.callId)) {
+        continue;
+      }
       publishFunctionCallId(evt.functionCallDone.callId);
+      yield* ensureToolBlock(evt.functionCallDone.callId, evt.functionCallDone.name);
       // Emit full arguments if no deltas were streamed
       if (!callIdsWithDeltas.has(evt.functionCallDone.callId)) {
         yield formatSSE("content_block_delta", {
@@ -198,11 +229,7 @@ export async function* streamCodexToAnthropic(
         });
       }
       // Close this tool_use block
-      yield formatSSE("content_block_stop", {
-        type: "content_block_stop",
-        index: contentIndex,
-      });
-      contentIndex++;
+      yield* closeToolBlockIfOpen();
       continue;
     }
 
@@ -210,6 +237,7 @@ export async function* streamCodexToAnthropic(
       case "response.output_text.delta": {
         if (evt.textDelta) {
           hasContent = true;
+          sawTextDelta = true;
           // Close thinking block if open (transition from thinking → text)
           yield* closeThinkingIfOpen();
           // Open a text block if not already open
@@ -220,6 +248,38 @@ export async function* streamCodexToAnthropic(
             delta: { type: "text_delta", text: evt.textDelta },
           });
         }
+        break;
+      }
+
+      case "response.output_text.done":
+      case "response.output_item.done": {
+        if (evt.messageText && !sawTextDelta) {
+          hasContent = true;
+          yield* closeThinkingIfOpen();
+          yield* ensureTextBlock();
+          yield formatSSE("content_block_delta", {
+            type: "content_block_delta",
+            index: contentIndex,
+            delta: { type: "text_delta", text: evt.messageText },
+          });
+        }
+        break;
+      }
+
+      case "response.incomplete": {
+        if (evt.usage) {
+          inputTokens = evt.usage.input_tokens;
+          outputTokens = evt.usage.output_tokens;
+          const adjusted = resolveCacheUsage(inputTokens, evt.usage.cached_tokens, usageHint);
+          cachedTokens = adjusted.cacheReadTokens || undefined;
+          onUsage?.({
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+            cached_tokens: cachedTokens,
+            reasoning_tokens: evt.usage.reasoning_tokens,
+          });
+        }
+        stopReason = hasToolCalls ? "tool_use" : "max_tokens";
         break;
       }
 
@@ -253,6 +313,7 @@ export async function* streamCodexToAnthropic(
   // 3. Close any open blocks
   yield* closeThinkingIfOpen();
   yield* closeTextIfOpen();
+  yield* closeToolBlockIfOpen();
 
   // 4. message_delta with stop_reason and usage
   // cache_creation_input_tokens: tokens not served from cache (will be cached for next turn)
@@ -260,7 +321,7 @@ export async function* streamCodexToAnthropic(
   const { cacheReadTokens, cacheCreationTokens } = resolveCacheUsage(inputTokens, cachedTokens, usageHint);
   yield formatSSE("message_delta", {
     type: "message_delta",
-    delta: { stop_reason: hasToolCalls ? "tool_use" : "end_turn" },
+    delta: { stop_reason: hasToolCalls ? "tool_use" : stopReason },
     usage: {
       input_tokens: inputTokens,
       output_tokens: outputTokens,
@@ -294,10 +355,12 @@ export async function collectCodexToAnthropicResponse(
   const id = `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
   let fullText = "";
   let fullReasoning = "";
+  let sawTextDelta = false;
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedTokens: number | undefined;
   let responseId: string | null = null;
+  let stopReason: AnthropicMessagesResponse["stop_reason"] = "end_turn";
   const functionCallIds = new Set<string>();
 
   // Collect tool calls
@@ -308,18 +371,27 @@ export async function collectCodexToAnthropicResponse(
     if (evt.error) {
       throw codexApiErrorFromEvent(evt.error);
     }
-    if (evt.textDelta) fullText += evt.textDelta;
+    if (evt.textDelta) {
+      sawTextDelta = true;
+      fullText += evt.textDelta;
+    }
+    if (evt.messageText && !sawTextDelta && !fullText) fullText += evt.messageText;
     if (evt.reasoningDelta) fullReasoning += evt.reasoningDelta;
     if (evt.usage) {
       inputTokens = evt.usage.input_tokens;
       outputTokens = evt.usage.output_tokens;
       cachedTokens = evt.usage.cached_tokens;
     }
+    if (evt.typed.type === "response.incomplete") {
+      stopReason = "max_tokens";
+    }
     if (evt.functionCallDone) {
+      if (functionCallIds.has(evt.functionCallDone.callId)) continue;
       functionCallIds.add(evt.functionCallDone.callId);
       let parsedInput: Record<string, unknown> = {};
       try {
-        parsedInput = JSON.parse(evt.functionCallDone.arguments) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(evt.functionCallDone.arguments);
+        parsedInput = isRecord(parsed) ? parsed : { input: parsed };
       } catch { /* use empty object */ }
       toolUseBlocks.push({
         type: "tool_use",
@@ -369,7 +441,7 @@ export async function collectCodexToAnthropicResponse(
       role: "assistant",
       content,
       model,
-      stop_reason: hasToolCalls ? "tool_use" : "end_turn",
+      stop_reason: hasToolCalls ? "tool_use" : stopReason,
       stop_sequence: null,
       usage,
     },

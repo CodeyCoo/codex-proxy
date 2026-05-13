@@ -83,12 +83,93 @@ export interface ExtractedEvent {
   typed: TypedCodexEvent;
   responseId?: string;
   textDelta?: string;
+  messageText?: string;
   reasoningDelta?: string;
   usage?: UsageInfo;
   error?: { code: string; message: string };
   functionCallStart?: FunctionCallStart;
   functionCallDelta?: FunctionCallDelta;
   functionCallDone?: FunctionCallDone;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {});
+  } catch {
+    return "{}";
+  }
+}
+
+function objectOrWrappedInput(value: unknown): string {
+  if (isRecord(value)) return safeJsonStringify(value);
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (isRecord(parsed)) return safeJsonStringify(parsed);
+    } catch {
+      // Free-form custom tool input, wrap it in a valid JSON object for Anthropic input_json_delta.
+    }
+    return safeJsonStringify({ input: value });
+  }
+  return safeJsonStringify({ input: value });
+}
+
+function extractMessageTextFromOutputItem(item: { content?: unknown[] }): string | undefined {
+  if (!Array.isArray(item.content)) return undefined;
+  const text = item.content
+    .map((part) => {
+      if (!isRecord(part)) return null;
+      if (typeof part.text === "string" && (part.type === "output_text" || part.type === "text")) {
+        return part.text;
+      }
+      return null;
+    })
+    .filter((part): part is string => part !== null)
+    .join("");
+  return text || undefined;
+}
+
+function extractToolCallFromOutputItem(
+  item: Extract<TypedCodexEvent, { type: "response.output_item.done" }>["item"],
+): FunctionCallDone | undefined {
+  const callId = item.call_id ?? item.id;
+  if (!callId) return undefined;
+
+  switch (item.type) {
+    case "function_call":
+      return {
+        callId,
+        name: item.name ?? "unknown",
+        arguments: typeof item.arguments === "string" ? item.arguments : safeJsonStringify(item.arguments ?? {}),
+      };
+    case "custom_tool_call":
+      return {
+        callId,
+        name: item.name ?? "custom_tool_call",
+        arguments: objectOrWrappedInput(item.input),
+      };
+    case "tool_search_call":
+      return {
+        callId,
+        name: "tool_search_call",
+        arguments: objectOrWrappedInput(item.arguments),
+      };
+    case "local_shell_call":
+      return {
+        callId,
+        name: "local_shell_call",
+        arguments: safeJsonStringify({
+          ...(item.status ? { status: item.status } : {}),
+          ...(item.action !== undefined ? { action: item.action } : {}),
+        }),
+      };
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -119,6 +200,10 @@ export async function* iterateCodexEvents(
 
       case "response.output_text.delta":
         extracted.textDelta = typed.delta;
+        break;
+
+      case "response.output_text.done":
+        extracted.messageText = typed.text;
         break;
 
       case "response.reasoning_summary_text.delta":
@@ -161,7 +246,17 @@ export async function* iterateCodexEvents(
         break;
       }
 
-      case "response.output_item.done":
+      case "response.output_item.done": {
+        const toolCall = extractToolCallFromOutputItem(typed.item);
+        if (toolCall) {
+          extracted.functionCallDone = toolCall;
+          break;
+        }
+        if (typed.item.type === "message") {
+          extracted.messageText = extractMessageTextFromOutputItem(typed.item);
+        }
+        break;
+      }
       case "response.content_part.added":
       case "response.content_part.done":
       case "response.output_text.annotation.added":
