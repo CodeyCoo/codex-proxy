@@ -122,9 +122,7 @@ describe("rotation-strategy", () => {
       expect(strategy.select([a, b], state).id).toBe("b");
     });
 
-    it.skip("disperses across tied candidates on cold start (thundering herd)", () => {
-      // Current fork: least_used is an alias for smart rotation.
-      // Tie-breaking via roundRobinIndex is not yet implemented in smart strategy.
+    it("disperses across tied candidates on cold start (thundering herd)", () => {
       const freshState: RotationState = { roundRobinIndex: 0, lastSelectedId: null };
       const candidates = [makeEntry("a"), makeEntry("b"), makeEntry("c")];
       const picks = Array.from({ length: 6 }, () =>

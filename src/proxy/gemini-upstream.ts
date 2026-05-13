@@ -70,6 +70,7 @@ export class GeminiUpstream implements UpstreamAdapter {
     let sentCreated = false;
     let inputTokens = 0;
     let outputTokens = 0;
+    let cachedTokens = 0;
 
     // Gemini tool call state: track by index
     const toolCalls = new Map<
@@ -95,6 +96,7 @@ export class GeminiUpstream implements UpstreamAdapter {
         const u = chunk.usageMetadata;
         if (typeof u.promptTokenCount === "number") inputTokens = u.promptTokenCount;
         if (typeof u.candidatesTokenCount === "number") outputTokens = u.candidatesTokenCount;
+        if (typeof u.cachedContentTokenCount === "number") cachedTokens = u.cachedContentTokenCount;
       }
 
       const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
@@ -162,7 +164,7 @@ export class GeminiUpstream implements UpstreamAdapter {
           usage: {
             input_tokens: inputTokens,
             output_tokens: outputTokens,
-            input_tokens_details: {},
+            input_tokens_details: cachedTokens > 0 ? { cached_tokens: cachedTokens } : {},
             output_tokens_details: {},
           },
         },

@@ -102,7 +102,7 @@ export class AnthropicUpstream implements UpstreamAdapter {
     let messageId = fallbackId;
     let inputTokens = 0;
     let outputTokens = 0;
-    let cachedTokens: number | undefined;
+    let cachedTokens = 0;
     let stopReason: string | undefined;
     let stopSequence: string | null = null;
 
@@ -123,6 +123,9 @@ export class AnthropicUpstream implements UpstreamAdapter {
             const usage = isRecord(msg.usage) ? msg.usage : null;
             if (usage && typeof usage.input_tokens === "number") {
               inputTokens = usage.input_tokens;
+            }
+            if (usage && typeof usage.cache_read_input_tokens === "number") {
+              cachedTokens = usage.cache_read_input_tokens;
             }
           }
           yield {
@@ -204,7 +207,7 @@ export class AnthropicUpstream implements UpstreamAdapter {
               outputTokens = usage.output_tokens;
             }
             if (typeof usage.cache_read_input_tokens === "number") {
-              cachedTokens = usage.cache_read_input_tokens;
+              cachedTokens = Math.max(cachedTokens, usage.cache_read_input_tokens);
             }
           }
           if (delta) {
@@ -224,9 +227,7 @@ export class AnthropicUpstream implements UpstreamAdapter {
                 usage: {
                   input_tokens: inputTokens,
                   output_tokens: outputTokens,
-                  ...(cachedTokens != null
-                    ? { input_tokens_details: { cached_tokens: cachedTokens } }
-                    : { input_tokens_details: {} }),
+                  input_tokens_details: cachedTokens > 0 ? { cached_tokens: cachedTokens } : {},
                   output_tokens_details: {},
                 },
                 stop_reason: stopReason,

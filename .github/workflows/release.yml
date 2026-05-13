@@ -106,7 +106,90 @@ jobs:
 
       - name: Pack (${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }})
         working-directory: packages/electron
-        run: npx electron-builder --config electron-builder.yml --${{ matrix.platform }} ${{ matrix.arch && format('--{0}', matrix.arch) || '' }} --publish always
+        # shell: bash needed so the Windows runner uses Git Bash instead of pwsh
+        # (pwsh doesn't handle backslash line continuations the same way).
+        shell: bash
+        run: |
+          # Drive electron-builder version from the tag, not package.json. Required
+          # so beta tags (vX.Y.Z-beta.SHA, where bump-electron-beta.yml deliberately
+          # does NOT touch package.json) publish to the correct GitHub release and
+          # are detected as prerelease by electron-builder's semver suffix check.
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          # --publish never: build artifacts to release/ but don't upload yet.
+          # The Smoke step below gates the upload — better to ship nothing than
+          # ship a binary that crashes on startup (cf. v2.0.71/72 events bug).
+          npx electron-builder --config electron-builder.yml \
+            --${{ matrix.platform }} ${{ matrix.arch && format('--{0}', matrix.arch) || '' }} \
+            --config.extraMetadata.version="$VERSION" \
+            --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install AppImage runtime (Linux only)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update -qq
+          # libfuse2 = AppImage runtime; xvfb = virtual display so the
+          # Electron renderer can spawn a window in a headless runner.
+          sudo apt-get install -y libfuse2 xvfb
+
+      - name: Smoke test packaged binary (${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }})
+        shell: bash
+        env:
+          RELEASE_DIR: packages/electron/release
+          MAC_ARCH: ${{ matrix.arch }}
+          SMOKE_LOG: ${{ runner.temp }}/electron-smoke.log
+        run: bash .github/scripts/electron-smoke.sh
+
+      - name: Upload smoke log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-smoke-${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}-log
+          path: ${{ runner.temp }}/electron-smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload artifacts to release (${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }})
+        # Only runs when smoke succeeded. Mirrors the build-mac-x64
+        # job's manual-upload pattern; replaces what `--publish always`
+        # used to do, but conditional on artifact actually working.
+        shell: bash
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          # Ensure the GitHub Release exists. With --publish never above,
+          # electron-builder no longer creates it, so the first uploader
+          # to arrive needs to. `|| true` swallows the 422 that the
+          # concurrent matrix jobs hit when a peer wins the race.
+          IS_PRERELEASE=""
+          if [[ "$TAG" == *-* ]]; then IS_PRERELEASE="--prerelease"; fi
+          gh release create "$TAG" --title "$TAG" --notes "" --draft=false $IS_PRERELEASE 2>/dev/null || true
+          cd packages/electron/release
+          case "${{ matrix.platform }}" in
+            mac)
+              # arm64 only — x64 handled by build-mac-x64 job.
+              for f in *arm64* latest-mac.yml; do
+                [ -f "$f" ] || continue
+                echo "Uploading: $f"
+                gh release upload "$TAG" "$f" --clobber
+              done
+              ;;
+            linux)
+              for f in Codex-Proxy-*-linux* latest-linux.yml; do
+                [ -f "$f" ] || continue
+                echo "Uploading: $f"
+                gh release upload "$TAG" "$f" --clobber
+              done
+              ;;
+            win)
+              for f in Codex-Proxy-*-win* latest.yml; do
+                [ -f "$f" ] || continue
+                echo "Uploading: $f"
+                gh release upload "$TAG" "$f" --clobber
+              done
+              ;;
+          esac
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -184,11 +267,41 @@ jobs:
 
       - name: Pack (mac-x64)
         working-directory: packages/electron
-        run: npx electron-builder --config electron-builder.yml --mac --x64 --publish never
+        shell: bash
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          npx electron-builder --config electron-builder.yml \
+            --mac --x64 \
+            --config.extraMetadata.version="$VERSION" \
+            --publish never
+
+      - name: Smoke test packaged binary (mac-x64)
+        shell: bash
+        env:
+          RELEASE_DIR: packages/electron/release
+          MAC_ARCH: x64
+          SMOKE_LOG: ${{ runner.temp }}/electron-smoke.log
+        run: bash .github/scripts/electron-smoke.sh
+
+      - name: Upload smoke log on failure (mac-x64)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-smoke-mac-x64-log
+          path: ${{ runner.temp }}/electron-smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload x64 artifacts to release
         run: |
           TAG="${{ inputs.tag || github.ref_name }}"
+          # Same release-create safety net as the main build job —
+          # this job runs after `build` but if all 3 main matrix
+          # platforms failed smoke, the release wouldn't exist yet.
+          IS_PRERELEASE=""
+          if [[ "$TAG" == *-* ]]; then IS_PRERELEASE="--prerelease"; fi
+          gh release create "$TAG" --title "$TAG" --notes "" --draft=false $IS_PRERELEASE 2>/dev/null || true
           cd packages/electron/release
           for f in *; do
             [ -f "$f" ] || continue
@@ -243,7 +356,24 @@ jobs:
       - name: Generate release notes and publish
         run: |
           TAG="${{ steps.tag.outputs.name }}"
-          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | grep -v "^${TAG}$" | head -1)
+          # PREV_TAG must stay within the same channel (stable vs beta) or
+          # release notes get cross-channel bleed. Old logic took the
+          # numerically-highest other v-tag, which would pick a v2.1.0-beta.X
+          # left over from a test branch as "previous" when shipping v2.0.73,
+          # producing a 30-commit changelog spanning unrelated history.
+          if [[ "$TAG" == *-* ]]; then
+            # Current is a beta (has -suffix). Prefer another beta; fall
+            # back to the latest stable so the very first beta in a series
+            # still gets a sensible diff base.
+            PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-' | grep -v "^${TAG}$" | head -1 || true)
+            if [ -z "$PREV_TAG" ]; then
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+            fi
+          else
+            # Current is stable. Compare only to other stables — never let
+            # a beta tag (which lives on its own ref) sneak in as PREV_TAG.
+            PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${TAG}$" | head -1 || true)
+          fi
           if [ -z "$PREV_TAG" ]; then
             BODY="Initial release"
           else
@@ -255,7 +385,14 @@ jobs:
             fi
           fi
           echo "$BODY" > /tmp/release-notes.md
-          gh release edit "$TAG" --draft=false --notes-file /tmp/release-notes.md 2>/dev/null || \
-            gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md
+
+          # Tag like v1.2.3-beta.SHA → mark as prerelease (semver convention).
+          # Defensive: electron-builder normally does this, but the create fallback
+          # below would miss it when electron-builder's draft creation didn't fire.
+          PRERELEASE_FLAG=""
+          case "$TAG" in *-*) PRERELEASE_FLAG="--prerelease" ;; esac
+
+          gh release edit "$TAG" --draft=false $PRERELEASE_FLAG --notes-file /tmp/release-notes.md 2>/dev/null || \
+            gh release create "$TAG" --title "$TAG" $PRERELEASE_FLAG --notes-file /tmp/release-notes.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

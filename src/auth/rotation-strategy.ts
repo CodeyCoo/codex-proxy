@@ -144,17 +144,26 @@ function weightedScore(
 
 function createSmartStrategy(weights: SmartWeights): RotationStrategy {
   return {
-    select(candidates, _state, sessionCounts) {
+    select(candidates, state, sessionCounts) {
       const stats = computePoolStats(candidates, sessionCounts);
       let best = candidates[0];
       let bestScore = Infinity;
+      let tied: AccountEntry[] = [];
       for (const c of candidates) {
         const scores = dimensionScores(c, stats, sessionCounts);
         const score = weightedScore(scores, weights);
         if (score < bestScore) {
           bestScore = score;
           best = c;
+          tied = [c];
+        } else if (score === bestScore) {
+          tied.push(c);
         }
+      }
+      if (tied.length > 1) {
+        const selected = tied[state.roundRobinIndex % tied.length];
+        state.roundRobinIndex++;
+        return selected;
       }
       return best;
     },

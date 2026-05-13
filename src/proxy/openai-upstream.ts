@@ -65,7 +65,7 @@ export class OpenAIUpstream implements UpstreamAdapter {
     const responseId = `openai-${randomUUID().slice(0, 8)}`;
     let sentCreated = false;
     let finishReason: string | null = null;
-    const usage = { input_tokens: 0, output_tokens: 0 };
+    const usage = { input_tokens: 0, output_tokens: 0, cached_tokens: 0 };
 
     // Maps tool call index → { id, name, argBuffer }
     const toolCalls = new Map<
@@ -94,6 +94,10 @@ export class OpenAIUpstream implements UpstreamAdapter {
         const u = chunk.usage;
         usage.input_tokens = typeof u.prompt_tokens === "number" ? u.prompt_tokens : 0;
         usage.output_tokens = typeof u.completion_tokens === "number" ? u.completion_tokens : 0;
+        const ptd = isRecord(u.prompt_tokens_details) ? u.prompt_tokens_details : null;
+        if (ptd && typeof ptd.cached_tokens === "number") {
+          usage.cached_tokens = ptd.cached_tokens;
+        }
       }
 
       const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
@@ -172,7 +176,7 @@ export class OpenAIUpstream implements UpstreamAdapter {
           usage: {
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
-            input_tokens_details: {},
+            input_tokens_details: usage.cached_tokens > 0 ? { cached_tokens: usage.cached_tokens } : {},
             output_tokens_details: {},
           },
         },

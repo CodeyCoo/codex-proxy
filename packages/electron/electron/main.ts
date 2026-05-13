@@ -156,16 +156,22 @@ app.on("ready", async () => {
     if (app.isPackaged) {
       let autoUpdate = true;
       let autoDownload = false;
+      let showUpdateDialog = false;
+      let allowPrerelease = false;
       try {
         const updateCfg = getConfig().update;
         autoUpdate = updateCfg.auto_update;
         autoDownload = updateCfg.auto_download;
+        showUpdateDialog = updateCfg.show_update_dialog;
+        allowPrerelease = updateCfg.allow_prerelease;
       } catch { /* use defaults */ }
       initAutoUpdater({
         getMainWindow: () => mainWindow,
         rebuildTrayMenu,
         autoUpdate,
         autoDownload,
+        showUpdateDialog,
+        allowPrerelease,
       });
     }
   } catch (err) {
