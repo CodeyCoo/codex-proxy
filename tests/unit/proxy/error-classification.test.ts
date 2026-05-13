@@ -1,8 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { CodexApiError } from "@src/proxy/codex-types.js";
 import {
+  extractEdgeHtml403Details,
   extractRetryAfterSec,
+  formatEdgeHtml403Message,
   isBanError,
+  isEdgeHtml403Body,
+  isEdgeHtml403Error,
   isQuotaExhaustedError,
   isTokenInvalidError,
   isModelNotSupportedError,
@@ -85,6 +89,41 @@ describe("isBanError", () => {
     expect(isBanError(new Error("random"))).toBe(false);
     expect(isBanError("string")).toBe(false);
     expect(isBanError(null)).toBe(false);
+  });
+});
+
+describe("isEdgeHtml403Error", () => {
+  it("detects HTML 403 block pages", () => {
+    const err = new CodexApiError(403, '<html><body><div class="blocked-icon"></div></body></html>');
+    expect(isEdgeHtml403Error(err)).toBe(true);
+  });
+
+  it("detects Cloudflare challenge markers", () => {
+    expect(isEdgeHtml403Body(403, "cf-mitigated: challenge")).toBe(true);
+    expect(isEdgeHtml403Body(403, "Please enable cookies")).toBe(true);
+  });
+
+  it("does not match JSON account-level 403", () => {
+    const err = new CodexApiError(403, '{"detail":"Your account has been flagged"}');
+    expect(isEdgeHtml403Error(err)).toBe(false);
+    expect(isBanError(err)).toBe(true);
+  });
+
+  it("formats a user-facing diagnostic without leaking HTML", () => {
+    const message = formatEdgeHtml403Message();
+    expect(message).toContain("HTML 403");
+    expect(message).toContain("direct mode");
+    expect(message).not.toContain("<html");
+  });
+
+  it("extracts safe IP and Ray ID fields from an HTML 403 page", () => {
+    const details = extractEdgeHtml403Details(`
+      <html><body><p>[IP:87.232.98.13 | Ray ID: 93f64d2c1e21abcd]</p></body></html>
+    `);
+    expect(details).toEqual({
+      egressIp: "87.232.98.13",
+      rayId: "93f64d2c1e21abcd",
+    });
   });
 });
 

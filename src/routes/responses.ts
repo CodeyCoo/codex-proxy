@@ -44,6 +44,7 @@ import {
   OPENAI_SUBAGENT_HEADER,
   sanitizeClientMetadata,
 } from "../proxy/openai-subagent.js";
+import { formatEdgeHtml403Message, isEdgeHtml403Body } from "../proxy/error-classification.js";
 
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const X_CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata";
@@ -141,6 +142,13 @@ function stripCodexErrorPrefix(message: string): string {
 
 function classifyResponsesStreamError(status: number, message: string): ResponsesStreamError {
   const cleanMessage = stripCodexErrorPrefix(message);
+  if (isEdgeHtml403Body(status, cleanMessage)) {
+    return {
+      type: "invalid_request_error",
+      code: "upstream_edge_html_403",
+      message: formatEdgeHtml403Message(),
+    };
+  }
   if (status === 429) {
     return {
       type: "rate_limit_error",

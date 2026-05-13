@@ -259,6 +259,30 @@ describe("CodexApi.createResponse", () => {
     } as unknown as TlsTransport;
   }
 
+  function transportResponse(status: number, body: string, headers?: Headers): TlsTransportResponse {
+    return {
+      status,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body));
+          controller.close();
+        },
+      }),
+      headers: headers ?? new Headers(),
+      setCookieHeaders: [],
+    };
+  }
+
+  function request() {
+    return {
+      model: "gpt-5.4",
+      instructions: "test",
+      input: [{ role: "user" as const, content: "Hi" }],
+      stream: true as const,
+      store: false as const,
+    };
+  }
+
   it("throws CodexApiError on non-2xx status", async () => {
     const errorBody = '{"detail":"Unauthorized"}';
     const mockTransport = makeMockTransport({
@@ -338,6 +362,54 @@ describe("CodexApi.createResponse", () => {
       // Body should be capped at 1MB
       expect(err.body.length).toBeLessThanOrEqual(1024 * 1024);
     }
+  });
+
+  it("retries HTML 403 once through direct mode after account proxy", async () => {
+    const post = vi.fn()
+      .mockResolvedValueOnce(transportResponse(403, "<html><body>blocked-icon</body></html>"))
+      .mockResolvedValueOnce(transportResponse(200, "event: response.completed\ndata: {}\n\n", new Headers({
+        "content-type": "text/event-stream",
+      })));
+    const mockTransport = makeMockTransport({ post });
+
+    const api = new CodexApi(
+      "test-token",
+      null,
+      null,
+      "e1",
+      "http://proxy.local:8080",
+      undefined,
+      mockTransport,
+    );
+
+    const response = await api.createResponse(request());
+
+    expect(response.status).toBe(200);
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post.mock.calls[0][5]).toBe("http://proxy.local:8080");
+    expect(post.mock.calls[1][5]).toBeNull();
+  });
+
+  it("does not retry JSON 403 account errors", async () => {
+    const post = vi.fn().mockResolvedValue(
+      transportResponse(403, '{"detail":"Your account has been flagged"}'),
+    );
+    const mockTransport = makeMockTransport({ post });
+    const api = new CodexApi(
+      "test-token",
+      null,
+      null,
+      "e1",
+      "http://proxy.local:8080",
+      undefined,
+      mockTransport,
+    );
+
+    await expect(api.createResponse(request())).rejects.toMatchObject({
+      status: 403,
+      body: '{"detail":"Your account has been flagged"}',
+    });
+    expect(post).toHaveBeenCalledTimes(1);
   });
 });
 

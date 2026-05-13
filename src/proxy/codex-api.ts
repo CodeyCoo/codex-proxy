@@ -10,7 +10,7 @@
  */
 
 import { getConfig } from "../config.js";
-import { getTransport, type TlsTransport } from "../tls/transport.js";
+import { getTransport, type TlsTransport, type TlsTransportResponse } from "../tls/transport.js";
 import {
   buildHeaders,
   buildHeadersWithContentType,
@@ -26,6 +26,9 @@ import { fetchUsage } from "./codex-usage.js";
 import { fetchModels, probeEndpoint as probeEndpointFn } from "./codex-models.js";
 import type { CookieJar } from "./cookie-jar.js";
 import type { BackendModelEntry } from "../models/model-store.js";
+import { isEdgeHtml403Body } from "./error-classification.js";
+import { buildOfficialProxyAttempts } from "./official-edge-fallback.js";
+import { appendEdge403Event } from "../logs/edge-403.js";
 
 const X_CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata";
 const X_CODEX_BETA_FEATURES_HEADER = "x-codex-beta-features";
@@ -188,12 +191,93 @@ export class CodexApi {
     }
   }
 
+  private async readErrorBody(response: TlsTransportResponse): Promise<string> {
+    const MAX_ERROR_BODY = 1024 * 1024;
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalSize = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalSize += value.byteLength;
+      if (totalSize <= MAX_ERROR_BODY) {
+        chunks.push(value);
+      } else {
+        const overshoot = totalSize - MAX_ERROR_BODY;
+        if (value.byteLength > overshoot) {
+          chunks.push(value.subarray(0, value.byteLength - overshoot));
+        }
+        reader.cancel();
+        break;
+      }
+    }
+    return Buffer.concat(chunks).toString("utf-8");
+  }
+
+  private async postWithEdgeFallback(options: {
+    label: string;
+    url: string;
+    headers: Record<string, string>;
+    body: string;
+    signal?: AbortSignal;
+  }): Promise<TlsTransportResponse> {
+    const transport = this.resolveTransport();
+    const attempts = buildOfficialProxyAttempts(this.proxyUrl);
+
+    for (let i = 0; i < attempts.length; i++) {
+      const attempt = attempts[i];
+      let transportRes: TlsTransportResponse;
+      try {
+        transportRes = await transport.post(
+          options.url,
+          options.headers,
+          options.body,
+          options.signal,
+          undefined,
+          attempt.proxyUrl,
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new CodexApiError(0, msg);
+      }
+
+      this.captureCookies(transportRes.setCookieHeaders);
+
+      if (transportRes.status >= 200 && transportRes.status < 300) {
+        return transportRes;
+      }
+
+      const errorBody = await this.readErrorBody(transportRes);
+      const edgeHtml403 = isEdgeHtml403Body(transportRes.status, errorBody);
+      if (edgeHtml403) {
+        appendEdge403Event({
+          body: errorBody,
+          endpoint: options.label,
+          accountEntryId: this.entryId,
+          accountId: this.accountId,
+          proxyMode: attempt.label,
+          proxyUrl: attempt.proxyUrl,
+        });
+      }
+      if (edgeHtml403 && i + 1 < attempts.length) {
+        continue;
+      }
+
+      throw new CodexApiError(transportRes.status, errorBody);
+    }
+
+    throw new CodexApiError(0, "No Codex upstream proxy attempts were available");
+  }
+
   /** Query official Codex usage/quota. Delegates to standalone fetchUsage(). */
   async getUsage(): Promise<CodexUsageResponse> {
     const headers = this.applyHeaders(
       buildHeaders(this.token, this.accountId),
     );
-    return fetchUsage(headers, this.proxyUrl);
+    return fetchUsage(headers, this.proxyUrl, undefined, undefined, {
+      accountEntryId: this.entryId,
+      accountId: this.accountId,
+    });
   }
 
   /**
@@ -236,7 +320,10 @@ export class CodexApi {
     const headers = this.applyHeaders(
       buildHeaders(this.token, this.accountId),
     );
-    return fetchModels(headers, this.proxyUrl);
+    return fetchModels(headers, this.proxyUrl, undefined, undefined, {
+      accountEntryId: this.entryId,
+      accountId: this.accountId,
+    });
   }
 
   /** Probe a backend endpoint and return raw JSON (for debug). */
@@ -349,7 +436,6 @@ export class CodexApi {
     request: CodexResponsesRequest,
     signal?: AbortSignal,
   ): Promise<Response> {
-    const transport = this.resolveTransport();
     const baseUrl = this.resolveBaseUrl();
     const url = `${baseUrl}/codex/responses`;
 
@@ -393,39 +479,13 @@ export class CodexApi {
     };
     const body = JSON.stringify(bodyWithMetadata);
 
-    let transportRes;
-    try {
-      transportRes = await transport.post(url, headers, body, signal, undefined, this.proxyUrl);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new CodexApiError(0, msg);
-    }
-
-    this.captureCookies(transportRes.setCookieHeaders);
-
-    if (transportRes.status < 200 || transportRes.status >= 300) {
-      const MAX_ERROR_BODY = 1024 * 1024;
-      const reader = transportRes.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let totalSize = 0;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        totalSize += value.byteLength;
-        if (totalSize <= MAX_ERROR_BODY) {
-          chunks.push(value);
-        } else {
-          const overshoot = totalSize - MAX_ERROR_BODY;
-          if (value.byteLength > overshoot) {
-            chunks.push(value.subarray(0, value.byteLength - overshoot));
-          }
-          reader.cancel();
-          break;
-        }
-      }
-      const errorBody = Buffer.concat(chunks).toString("utf-8");
-      throw new CodexApiError(transportRes.status, errorBody);
-    }
+    const transportRes = await this.postWithEdgeFallback({
+      label: "POST /codex/responses",
+      url,
+      headers,
+      body,
+      signal,
+    });
 
     return new Response(transportRes.body, {
       status: transportRes.status,
@@ -442,7 +502,6 @@ export class CodexApi {
     request: CodexCompactRequest,
     signal?: AbortSignal,
   ): Promise<CodexCompactResponse> {
-    const transport = this.resolveTransport();
     const baseUrl = this.resolveBaseUrl();
     const url = `${baseUrl}/codex/responses/compact`;
 
@@ -457,15 +516,13 @@ export class CodexApi {
 
     const body = JSON.stringify(request);
 
-    let transportRes;
-    try {
-      transportRes = await transport.post(url, headers, body, signal, undefined, this.proxyUrl);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new CodexApiError(0, msg);
-    }
-
-    this.captureCookies(transportRes.setCookieHeaders);
+    const transportRes = await this.postWithEdgeFallback({
+      label: "POST /codex/responses/compact",
+      url,
+      headers,
+      body,
+      signal,
+    });
 
     // Read the full response body (non-streaming)
     const reader = transportRes.body.getReader();

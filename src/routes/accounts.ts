@@ -13,7 +13,7 @@ import { CodexApi } from "../proxy/codex-api.js";
 import type { CookieJar } from "../proxy/cookie-jar.js";
 import type { ProxyPool } from "../proxy/proxy-pool.js";
 import { toQuota } from "../auth/quota-utils.js";
-import { isBanError, isTokenInvalidError } from "../proxy/error-classification.js";
+import { formatEdgeHtml403Message, isBanError, isEdgeHtml403Error, isTokenInvalidError } from "../proxy/error-classification.js";
 import { clearWarnings, getActiveWarnings, getWarningsLastUpdated } from "../auth/quota-warnings.js";
 import { probeAccount, batchHealthCheck } from "../auth/health-check.js";
 import { AccountImportService } from "../services/account-import.js";
@@ -194,12 +194,13 @@ export function createAccountRoutes(pool: AccountPool, scheduler: RefreshSchedul
       }
 
       const detail = err instanceof Error ? err.message : String(err);
-      const isCf = detail.includes("403") || detail.includes("cf_chl");
+      const isEdgeHtml403 = isEdgeHtml403Error(err);
       c.status(502);
       return c.json({
-        error: "Failed to fetch quota from Codex API", detail,
-        hint: isCf && !cookieJar?.getCookieHeader(id)
-          ? "Cloudflare blocked this request. Set cookies via POST /auth/accounts/:id/cookies with your browser's cf_clearance cookie."
+        error: "Failed to fetch quota from Codex API",
+        detail: isEdgeHtml403 ? formatEdgeHtml403Message() : detail,
+        hint: isEdgeHtml403
+          ? "Try direct mode, a different account proxy, re-login, or set browser cookies via POST /auth/accounts/:id/cookies."
           : undefined,
       });
     }

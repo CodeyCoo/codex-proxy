@@ -19,6 +19,54 @@ function isCodexLike(err: unknown): err is CodexLikeError {
   return typeof rec.status === "number" && typeof rec.body === "string";
 }
 
+const EDGE_HTML_403_HINT =
+  "Upstream returned an HTML 403 challenge/block page. This usually means chatgpt.com rejected the current network exit or session cookies; try direct mode, a different proxy, re-login, or refresh cf_clearance/__cf_bm cookies.";
+
+export function isEdgeHtml403Body(status: number, body: string): boolean {
+  if (status !== 403) return false;
+  const lower = body.toLowerCase();
+  return (
+    lower.includes("<html") ||
+    lower.includes("<!doctype") ||
+    lower.includes("cf_chl") ||
+    lower.includes("_cf_chl") ||
+    lower.includes("cf-mitigated") ||
+    lower.includes("cf-chl-bypass") ||
+    lower.includes("just a moment") ||
+    lower.includes("attention required") ||
+    lower.includes("blocked-icon") ||
+    lower.includes("please enable cookies") ||
+    lower.includes("enable javascript and cookies")
+  );
+}
+
+export function isEdgeHtml403Error(err: unknown): boolean {
+  if (!isCodexLike(err)) return false;
+  return isEdgeHtml403Body(err.status, `${err.body}\n${err.message}`);
+}
+
+export function formatEdgeHtml403Message(): string {
+  return EDGE_HTML_403_HINT;
+}
+
+export interface EdgeHtml403Details {
+  egressIp: string | null;
+  rayId: string | null;
+}
+
+export function extractEdgeHtml403Details(body: string): EdgeHtml403Details {
+  const ipMatch =
+    body.match(/\bIP\s*:\s*([0-9a-fA-F:.]{3,45})\b/i) ??
+    body.match(/\b(?:client|egress|exit)[\s_-]*ip\s*[:=]\s*["']?([0-9a-fA-F:.]{3,45})\b/i);
+  const rayMatch =
+    body.match(/\bRay\s*ID\s*:\s*([A-Za-z0-9_-]{8,80})\b/i) ??
+    body.match(/\bcf-ray\s*[:=]\s*["']?([A-Za-z0-9_-]{8,80})\b/i);
+  return {
+    egressIp: ipMatch?.[1] ?? null,
+    rayId: rayMatch?.[1] ?? null,
+  };
+}
+
 /** Extract the rate-limit reset duration from a 429 error body, if available. */
 export function extractRetryAfterSec(body: string): number | undefined {
   try {
@@ -46,8 +94,7 @@ export function isQuotaExhaustedError(err: unknown): boolean {
 export function isBanError(err: unknown): boolean {
   if (!isCodexLike(err)) return false;
   if (err.status !== 403) return false;
-  const body = err.body.toLowerCase();
-  if (body.includes("cf_chl") || body.includes("<!doctype") || body.includes("<html")) return false;
+  if (isEdgeHtml403Error(err)) return false;
   return true;
 }
 

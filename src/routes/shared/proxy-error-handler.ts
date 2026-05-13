@@ -8,7 +8,9 @@
 import type { AccountPool } from "../../auth/account-pool.js";
 import {
   extractRetryAfterSec,
+  formatEdgeHtml403Message,
   isBanError,
+  isEdgeHtml403Error,
   isQuotaExhaustedError,
   isTokenInvalidError,
   isModelNotSupportedError,
@@ -73,9 +75,15 @@ export function handleCodexApiError(
     return { action: "respond", status, message: err.message };
   }
 
+  // 2. Edge HTML 403 (Cloudflare/risk/session block) — do not mark the
+  // account banned, and do not leak the full HTML challenge body to logs or clients.
+  if (isEdgeHtml403Error(err)) {
+    return { action: "respond", status: 403, message: formatEdgeHtml403Message() };
+  }
+
   console.error(`[${tag}] Account ${entryId} | Codex API error:`, err.message);
 
-  // 2. Rate-limited — write into cachedQuota.rate_limit (single source of
+  // 3. Rate-limited — write into cachedQuota.rate_limit (single source of
   // truth). applyRateLimit429 internally never shrinks an existing reset_at,
   // so a fresh secondary-window lock survives a stale primary 429.
   if (err.status === 429) {
@@ -90,7 +98,7 @@ export function handleCodexApiError(
     return { action: "retry", status: 429, message: err.message, useFormat429: true };
   }
 
-  // 3. Quota exhausted (402 Payment Required)
+  // 4. Quota exhausted (402 Payment Required)
   if (isQuotaExhaustedError(err)) {
     pool.markStatus(entryId, "quota_exhausted");
     console.warn(
@@ -99,7 +107,7 @@ export function handleCodexApiError(
     return { action: "retry", status: 402, message: err.message };
   }
 
-  // 4. Ban (non-Cloudflare 403)
+  // 5. Ban (non-Cloudflare 403)
   if (isBanError(err)) {
     pool.markStatus(entryId, "banned");
     console.warn(
@@ -108,7 +116,7 @@ export function handleCodexApiError(
     return { action: "retry", status: 403, message: err.message };
   }
 
-  // 5. Token invalidated / account deactivated
+  // 6. Token invalidated / account deactivated
   if (isTokenInvalidError(err)) {
     const isDeactivated = err.message.toLowerCase().includes("deactivated");
     const newStatus = isDeactivated ? "banned" : "expired";
@@ -119,7 +127,7 @@ export function handleCodexApiError(
     return { action: "retry", status: 401, message: err.message };
   }
 
-  // 6. Generic error — return to client (preserve original body for passthrough)
+  // 7. Generic error — return to client (preserve original body for passthrough)
   const status = toErrorStatus(err.status);
   return { action: "respond", status, message: err.message, errorBody: err.body };
 }

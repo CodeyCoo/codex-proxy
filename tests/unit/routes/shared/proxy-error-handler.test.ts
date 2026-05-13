@@ -140,12 +140,24 @@ describe("handleCodexApiError", () => {
 
     it("does not treat Cloudflare challenge as ban", () => {
       const err = new CodexApiError(403, "<html>cf_chl challenge</html>");
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-      const result = handleCodexApiError(err, pool as never, entryId, model, tag, false);
+      try {
+        const result = handleCodexApiError(err, pool as never, entryId, model, tag, false);
 
-      // Cloudflare 403 is not a ban → generic error path
-      expect(result.action).toBe("respond");
-      expect(pool.markStatus).not.toHaveBeenCalled();
+        // Cloudflare/edge 403 is not a ban and should not leak the HTML body.
+        expect(result.action).toBe("respond");
+        expect(result.status).toBe(403);
+        expect(result.message).toContain("HTML 403");
+        expect(result.message).not.toContain("<html");
+        expect(pool.markStatus).not.toHaveBeenCalled();
+        expect(errorSpy).not.toHaveBeenCalled();
+        expect(warnSpy).not.toHaveBeenCalled();
+      } finally {
+        errorSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
     });
   });
 
