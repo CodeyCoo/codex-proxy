@@ -92,7 +92,7 @@ export type CodexInputItem =
   | { role: "assistant"; content: string }
   | { role: "system"; content: string }
   | { type: "function_call"; id?: string; call_id: string; name: string; arguments: string }
-  | { type: "function_call_output"; call_id: string; output: string };
+  | { type: "function_call_output"; call_id: string; output: string | CodexContentPart[] };
 
 /** Parsed SSE event from the Codex Responses stream */
 export interface CodexSSEEvent {

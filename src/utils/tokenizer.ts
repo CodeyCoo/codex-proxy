@@ -39,6 +39,12 @@ function extractItemText(item: CodexInputItem): string {
     return `${item.name}\n${item.arguments}`;
   }
   if (item.type === "function_call_output") {
+    if (Array.isArray(item.output)) {
+      return item.output
+        .filter((p) => p.type === "input_text")
+        .map((p) => p.text)
+        .join("\n");
+    }
     return item.output;
   }
   return "";

@@ -52,6 +52,13 @@ function contentPartsToOpenAI(parts: CodexContentPart[]): OpenAIContentPart[] {
   });
 }
 
+function codexOutputToText(output: string | CodexContentPart[]): string {
+  if (typeof output === "string") return output;
+  return output
+    .map((part) => part.type === "input_text" ? part.text : `[Image: ${part.image_url}]`)
+    .join("\n");
+}
+
 function inputItemsToMessages(input: CodexInputItem[]): OpenAIMessage[] {
   const messages: OpenAIMessage[] = [];
 
@@ -81,7 +88,7 @@ function inputItemsToMessages(input: CodexInputItem[]): OpenAIMessage[] {
       messages.push({
         role: "tool",
         tool_call_id: item.call_id,
-        content: item.output,
+        content: codexOutputToText(item.output),
       });
     }
   }

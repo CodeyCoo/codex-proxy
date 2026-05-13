@@ -145,7 +145,7 @@ export function getContinuationInputStartIndex(input: CodexResponsesRequest["inp
 
 export function getFunctionCallOutputIds(input: CodexResponsesRequest["input"]): string[] {
   return input
-    .filter((item): item is { type: "function_call_output"; call_id: string; output: string } =>
+    .filter((item): item is Extract<CodexResponsesRequest["input"][number], { type: "function_call_output" }> =>
       !("role" in item) && item.type === "function_call_output")
     .map((item) => item.call_id);
 }

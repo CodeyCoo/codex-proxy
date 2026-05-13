@@ -172,6 +172,196 @@ describe("translateAnthropicToCodexRequest", () => {
       });
     });
 
+    it("converts URL image block to input_image content part", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text" as const, text: "Describe this" },
+                {
+                  type: "image" as const,
+                  source: {
+                    type: "url" as const,
+                    url: "https://example.com/image.png",
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      const item = result.input[0];
+      const parts = item.content as Array<Record<string, unknown>>;
+      expect(parts[1]).toEqual({
+        type: "input_image",
+        image_url: "https://example.com/image.png",
+      });
+    });
+
+    it("converts text document block to structured input_text", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text" as const, text: "Use this document" },
+                {
+                  type: "document",
+                  title: "Release notes",
+                  context: "Attached by user",
+                  source: {
+                    type: "text",
+                    media_type: "text/plain",
+                    data: "Fixed prompt caching for Codex.",
+                  },
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+
+      expect(result.input).toHaveLength(1);
+      const content = (result.input[0] as { content: string }).content;
+      expect(content).toContain("Use this document");
+      expect(content).toContain("Document:");
+      expect(content).toContain("Title: Release notes");
+      expect(content).toContain("Context: Attached by user");
+      expect(content).toContain("Media type: text/plain");
+      expect(content).toContain("Fixed prompt caching for Codex.");
+    });
+
+    it("converts PDF document metadata without forwarding base64 payload", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "document",
+                  title: "Spec PDF",
+                  source: {
+                    type: "base64",
+                    media_type: "application/pdf",
+                    data: "JVBERi0xLjQ=",
+                  },
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+
+      const content = (result.input[0] as { content: string }).content;
+      expect(content).toContain("Title: Spec PDF");
+      expect(content).toContain("Source type: base64");
+      expect(content).toContain("Media type: application/pdf");
+      expect(content).toContain("Base64 data omitted (12 chars)");
+      expect(content).not.toContain("JVBERi0xLjQ=");
+    });
+
+    it("converts content-source documents and records omitted embedded images", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "document",
+                  title: "Mixed document",
+                  source: {
+                    type: "content",
+                    content: [
+                      { type: "text", text: "First paragraph" },
+                      {
+                        type: "image",
+                        source: { type: "url", url: "https://example.com/chart.png" },
+                      },
+                      { type: "text", text: "Second paragraph" },
+                    ],
+                  },
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+
+      const content = (result.input[0] as { content: string }).content;
+      expect(content).toContain("Title: Mixed document");
+      expect(content).toContain("First paragraph");
+      expect(content).toContain("[Image content omitted]");
+      expect(content).toContain("Second paragraph");
+    });
+
+    it("converts search_result block to structured input_text", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "search_result",
+                  title: "Codex release",
+                  source: "https://example.com/codex-release",
+                  content: [
+                    { type: "text", text: "Codex added a new response event." },
+                    { type: "text", text: "The event carries a completed item." },
+                  ],
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+
+      const content = (result.input[0] as { content: string }).content;
+      expect(content).toContain("Search result:");
+      expect(content).toContain("Title: Codex release");
+      expect(content).toContain("Source: https://example.com/codex-release");
+      expect(content).toContain("Codex added a new response event.");
+      expect(content).toContain("The event carries a completed item.");
+    });
+
+    it("keeps document and search_result as input_text parts when mixed with images", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image" as const,
+                  source: { type: "url" as const, url: "https://example.com/a.png" },
+                },
+                {
+                  type: "search_result",
+                  title: "Search hit",
+                  source: "https://example.com/hit",
+                  content: [{ type: "text", text: "Hit body" }],
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+
+      const parts = (result.input[0] as { content: Array<Record<string, unknown>> }).content;
+      expect(parts).toEqual([
+        { type: "input_image", image_url: "https://example.com/a.png" },
+        {
+          type: "input_text",
+          text: "Search result:\nTitle: Search hit\nSource: https://example.com/hit\nContent:\nHit body",
+        },
+      ]);
+    });
+
     it("converts tool_use block to function_call input item", () => {
       const result = translateAnthropicToCodexRequest(
         makeRequest({
@@ -200,6 +390,190 @@ describe("translateAnthropicToCodexRequest", () => {
         name: "search",
         arguments: '{"query":"test"}',
       });
+    });
+
+    it("converts server_tool_use block to function_call input item", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "server_tool_use",
+                  id: "srv_01",
+                  name: "web_search",
+                  input: { query: "codex responses" },
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+      const fcItem = result.input.find(
+        (i) => "type" in i && i.type === "function_call",
+      );
+      expect(fcItem).toMatchObject({
+        type: "function_call",
+        call_id: "srv_01",
+        name: "web_search",
+        arguments: '{"query":"codex responses"}',
+      });
+    });
+
+    it("converts web_search_tool_result to readable function_call_output", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "server_tool_use",
+                  id: "srv_web",
+                  name: "web_search",
+                  input: { query: "codex" },
+                },
+                {
+                  type: "web_search_tool_result",
+                  tool_use_id: "srv_web",
+                  content: [
+                    {
+                      type: "web_search_result",
+                      title: "Codex docs",
+                      url: "https://example.com/codex",
+                      page_age: "1 day",
+                      encrypted_content: "opaque",
+                    },
+                  ],
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+      const outputItem = result.input.find(
+        (i) => "type" in i && i.type === "function_call_output",
+      );
+      const output = (outputItem as Record<string, unknown>).output as string;
+      expect(output).toContain("Web search results:");
+      expect(output).toContain("Codex docs");
+      expect(output).toContain("https://example.com/codex");
+      expect(output).not.toContain("opaque");
+    });
+
+    it("converts bash_code_execution_tool_result to readable function_call_output", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "bash_code_execution_tool_result",
+                  tool_use_id: "srv_bash",
+                  content: {
+                    type: "bash_code_execution_result",
+                    return_code: 0,
+                    stdout: "42\n",
+                    stderr: "",
+                    content: [
+                      { type: "bash_code_execution_output", file_id: "file_123" },
+                    ],
+                  },
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+      const outputItem = result.input.find(
+        (i) => "type" in i && i.type === "function_call_output",
+      );
+      const output = (outputItem as Record<string, unknown>).output as string;
+      expect(output).toContain("return_code=0");
+      expect(output).toContain("stdout:\n42");
+      expect(output).toContain("file_id=file_123");
+    });
+
+    it("converts web_fetch and text editor server tool results", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "web_fetch_tool_result",
+                  tool_use_id: "srv_fetch",
+                  content: {
+                    type: "web_fetch_result",
+                    url: "https://example.com/page",
+                    retrieved_at: "2026-05-13T00:00:00Z",
+                    content: {
+                      type: "document",
+                      title: "Fetched page",
+                      source: {
+                        type: "text",
+                        media_type: "text/plain",
+                        data: "Fetched body",
+                      },
+                    },
+                  },
+                },
+                {
+                  type: "text_editor_code_execution_tool_result",
+                  tool_use_id: "srv_edit",
+                  content: {
+                    type: "text_editor_code_execution_view_result",
+                    file_type: "text",
+                    start_line: 1,
+                    num_lines: 1,
+                    total_lines: 1,
+                    content: "hello",
+                  },
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+      const outputs = result.input
+        .filter((i) => "type" in i && i.type === "function_call_output")
+        .map((i) => (i as Record<string, unknown>).output as string);
+      expect(outputs[0]).toContain("Web fetch result:");
+      expect(outputs[0]).toContain("Fetched body");
+      expect(outputs[1]).toContain("Text editor view result:");
+      expect(outputs[1]).toContain("hello");
+    });
+
+    it("converts tool_search_tool_result errors to readable output", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_search_tool_result",
+                  tool_use_id: "srv_tool_search",
+                  content: {
+                    type: "tool_search_tool_result_error",
+                    error_code: "unavailable",
+                    error_message: "index not ready",
+                  },
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+      const outputItem = result.input.find(
+        (i) => "type" in i && i.type === "function_call_output",
+      );
+      expect((outputItem as Record<string, unknown>).output).toBe(
+        "Tool search error: unavailable - index not ready",
+      );
     });
 
     it("converts tool_result block to function_call_output input item", () => {
@@ -269,6 +643,7 @@ describe("translateAnthropicToCodexRequest", () => {
       );
       // budgetToEffort(5000) → "medium"
       expect(result.reasoning?.effort).toBe("medium");
+      expect(result.include).toEqual(["reasoning.encrypted_content"]);
     });
 
     it("maps enabled thinking with small budget to low effort", () => {
@@ -427,9 +802,40 @@ describe("translateAnthropicToCodexRequest", () => {
       expect(result.store).toBe(false);
     });
 
+    it("sets Codex request defaults expected by current Responses API", () => {
+      const result = translateAnthropicToCodexRequest(makeRequest());
+      expect(result.tool_choice).toBe("auto");
+      expect(result.parallel_tool_calls).toBe(true);
+    });
+
     it("does not set reasoning when no effort is configured or requested", () => {
       const result = translateAnthropicToCodexRequest(makeRequest());
       expect(result.reasoning).toBeUndefined();
+    });
+
+    it("maps output_config.format json_schema to Codex text.format", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          output_config: {
+            format: {
+              type: "json_schema",
+              schema: {
+                type: "object",
+                properties: { answer: { type: "string" } },
+              },
+            },
+          },
+        }),
+      );
+      expect(result.text).toEqual({
+        format: {
+          type: "json_schema",
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string" } },
+          },
+        },
+      });
     });
   });
 
@@ -483,12 +889,55 @@ describe("translateAnthropicToCodexRequest", () => {
       expect(outputItem).toBeDefined();
       expect((outputItem as Record<string, unknown>).output).toBe("Line 1\nLine 2");
     });
+
+    it("converts document, search_result, and tool_reference blocks in tool_result output", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result" as const,
+                  tool_use_id: "toolu_rich",
+                  content: [
+                    {
+                      type: "document",
+                      title: "Fetched PDF",
+                      source: { type: "url", url: "https://example.com/file.pdf" },
+                    },
+                    {
+                      type: "search_result",
+                      title: "Search hit",
+                      source: "https://example.com/hit",
+                      content: [{ type: "text", text: "Search body" }],
+                    },
+                    { type: "tool_reference", tool_name: "WebSearch" },
+                  ],
+                },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+
+      const outputItem = result.input.find(
+        (i) => "type" in i && i.type === "function_call_output",
+      );
+      const output = (outputItem as Record<string, unknown>).output as string;
+      expect(output).toContain("Document:");
+      expect(output).toContain("Title: Fetched PDF");
+      expect(output).toContain("URL: https://example.com/file.pdf");
+      expect(output).toContain("Search result:");
+      expect(output).toContain("Search body");
+      expect(output).toContain("Tool reference: WebSearch");
+    });
   });
 
   // ── tool_result with image content (screenshot scenario) ───────────
 
   describe("tool_result with image content", () => {
-    it("extracts images from tool_result into a following user message", () => {
+    it("keeps images in function_call_output content array", () => {
       const result = translateAnthropicToCodexRequest(
         makeRequest({
           messages: [
@@ -516,22 +965,15 @@ describe("translateAnthropicToCodexRequest", () => {
         }),
       );
 
-      // Should produce function_call_output with text only
       const outputItem = result.input.find(
         (i) => "type" in i && i.type === "function_call_output",
       );
       expect(outputItem).toBeDefined();
-      expect((outputItem as Record<string, unknown>).output).toBe("Screenshot captured");
-
-      // Should produce a follow-up user message with the image
-      const userItem = result.input.find(
-        (i) => "role" in i && i.role === "user" && Array.isArray(i.content),
-      );
-      expect(userItem).toBeDefined();
-      const parts = (userItem as { content: Array<Record<string, unknown>> }).content;
-      expect(parts).toHaveLength(1);
-      expect(parts[0].type).toBe("input_image");
-      expect(parts[0].image_url).toBe("data:image/png;base64,iVBORw0KGgo=");
+      const output = (outputItem as Record<string, unknown>).output as Array<Record<string, unknown>>;
+      expect(output).toEqual([
+        { type: "input_text", text: "Screenshot captured" },
+        { type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgo=" },
+      ]);
     });
 
     it("handles tool_result with image-only content (no text)", () => {
@@ -565,14 +1007,10 @@ describe("translateAnthropicToCodexRequest", () => {
         (i) => "type" in i && i.type === "function_call_output",
       );
       expect(outputItem).toBeDefined();
-      expect((outputItem as Record<string, unknown>).output).toBe("");
-
-      const userItem = result.input.find(
-        (i) => "role" in i && i.role === "user" && Array.isArray(i.content),
-      );
-      expect(userItem).toBeDefined();
-      const parts = (userItem as { content: Array<Record<string, unknown>> }).content;
-      expect(parts[0].image_url).toBe("data:image/jpeg;base64,/9j/4AAQ");
+      const output = (outputItem as Record<string, unknown>).output as Array<Record<string, unknown>>;
+      expect(output).toEqual([
+        { type: "input_image", image_url: "data:image/jpeg;base64,/9j/4AAQ" },
+      ]);
     });
 
     it("handles tool_result with multiple images", () => {
@@ -603,14 +1041,14 @@ describe("translateAnthropicToCodexRequest", () => {
         }),
       );
 
-      const userItem = result.input.find(
-        (i) => "role" in i && i.role === "user" && Array.isArray(i.content),
+      const outputItem = result.input.find(
+        (i) => "type" in i && i.type === "function_call_output",
       );
-      expect(userItem).toBeDefined();
-      const parts = (userItem as { content: Array<Record<string, unknown>> }).content;
-      expect(parts).toHaveLength(2);
-      expect(parts[0].image_url).toBe("data:image/png;base64,img1");
-      expect(parts[1].image_url).toBe("data:image/png;base64,img2");
+      const parts = (outputItem as { output: Array<Record<string, unknown>> }).output;
+      expect(parts).toHaveLength(3);
+      expect(parts[0]).toEqual({ type: "input_text", text: "Two screenshots" });
+      expect(parts[1].image_url).toBe("data:image/png;base64,img1");
+      expect(parts[2].image_url).toBe("data:image/png;base64,img2");
     });
   });
 
@@ -740,6 +1178,32 @@ describe("translateAnthropicToCodexRequest", () => {
       );
       expect(assistantItem).toBeDefined();
       expect((assistantItem as Record<string, unknown>).content).toBe("answer");
+    });
+
+    it("adds safe notes for unsupported non-thinking blocks", () => {
+      const result = translateAnthropicToCodexRequest(
+        makeRequest({
+          messages: [
+            {
+              role: "assistant",
+              content: [
+                {
+                  type: "container_upload",
+                  file_id: "file_123",
+                  hidden: "not forwarded",
+                },
+                { type: "text" as const, text: "visible answer" },
+              ] as unknown as AnthropicMessagesRequest["messages"][number]["content"],
+            },
+          ],
+        }),
+      );
+      const assistantItem = result.input.find(
+        (i) => "role" in i && i.role === "assistant",
+      );
+      expect((assistantItem as Record<string, unknown>).content).toContain("container_upload");
+      expect((assistantItem as Record<string, unknown>).content).not.toContain("file_123");
+      expect((assistantItem as Record<string, unknown>).content).not.toContain("hidden");
     });
   });
 

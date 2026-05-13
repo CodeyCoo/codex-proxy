@@ -249,6 +249,10 @@ describe("anthropicToolChoiceToCodex", () => {
     expect(anthropicToolChoiceToCodex({ type: "any" })).toBe("required");
   });
 
+  it('maps "none" to "none"', () => {
+    expect(anthropicToolChoiceToCodex({ type: "none" })).toBe("none");
+  });
+
   it('maps "tool" to { type, name }', () => {
     const result = anthropicToolChoiceToCodex({
       type: "tool",

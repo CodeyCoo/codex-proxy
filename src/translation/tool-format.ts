@@ -247,6 +247,8 @@ export function anthropicToolChoiceToCodex(
       return "auto";
     case "any":
       return "required";
+    case "none":
+      return "none";
     case "tool":
       if (hasAnthropicHostedSearchToolChoice(choice.name, tools, options)) {
         return { type: "web_search" };

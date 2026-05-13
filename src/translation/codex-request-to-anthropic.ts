@@ -16,7 +16,7 @@ type AnthropicContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; source: { type: "url"; url: string } | { type: "base64"; media_type: string; data: string } }
   | { type: "tool_use"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; tool_use_id: string; content: string };
+  | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[] };
 
 interface AnthropicMessage {
   role: "user" | "assistant";
@@ -40,6 +40,13 @@ function codexPartToAnthropic(part: CodexContentPart): AnthropicContentBlock {
   }
   // input_image — pass as URL source
   return { type: "image", source: { type: "url", url: part.image_url } };
+}
+
+function codexOutputToAnthropicToolResultContent(
+  output: string | CodexContentPart[],
+): string | AnthropicContentBlock[] {
+  if (typeof output === "string") return output;
+  return output.map(codexPartToAnthropic);
 }
 
 function inputItemsToAnthropicMessages(input: CodexInputItem[]): AnthropicMessage[] {
@@ -76,7 +83,7 @@ function inputItemsToAnthropicMessages(input: CodexInputItem[]): AnthropicMessag
       const toolResult: AnthropicContentBlock = {
         type: "tool_result",
         tool_use_id: item.call_id,
-        content: item.output,
+        content: codexOutputToAnthropicToolResultContent(item.output),
       };
       // tool_result must be inside a user message
       const last = messages.at(-1);

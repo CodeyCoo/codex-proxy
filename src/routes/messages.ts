@@ -13,6 +13,7 @@ import {
 import type {
   AnthropicErrorBody,
   AnthropicErrorType,
+  AnthropicMessagesRequest,
   AnthropicMessageTokensCountResponse,
 } from "../types/anthropic.js";
 import type { AccountPool } from "../auth/account-pool.js";
@@ -72,8 +73,12 @@ const KNOWN_MESSAGE_REQUEST_KEYS = [
   "top_k",
   "stop_sequences",
   "metadata",
+  "cache_control",
   "container",
   "context_management",
+  "inference_geo",
+  "output_config",
+  "service_tier",
   "thinking",
   "tools",
   "tool_choice",
@@ -86,9 +91,11 @@ const KNOWN_COUNT_TOKENS_REQUEST_KEYS = [
   "cache_control",
   "container",
   "context_management",
+  "inference_geo",
   "mcp_servers",
   "output_config",
   "output_format",
+  "service_tier",
   "speed",
   "thinking",
   "tools",
@@ -245,22 +252,13 @@ export function createMessagesRoutes(
       );
     }
 
-    // Codex-backed routes: count tokens locally using tiktoken
-    const inputTokens = countRequestInputTokens({
-      model: req.model,
-      instructions: typeof req.system === "string"
-        ? req.system
-        : req.system?.map((b) => b.text).join("\n\n") ?? undefined,
-      input: req.messages.map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: typeof m.content === "string"
-          ? m.content
-          : m.content.map((b) => "text" in b ? (b as { text: string }).text : "").join("\n"),
-      })),
-      stream: true,
-      store: false,
-      tools: req.tools?.length ? req.tools.map((t) => ({ type: "function" as const, name: t.name, description: t.description ?? "", parameters: t.input_schema ?? {} })) : [],
-    });
+    // Codex-backed routes: estimate tokens after the same message-format
+    // translation used by /v1/messages, so rich blocks are not silently ignored.
+    const countCodexRequest = translateAnthropicToCodexRequest({
+      ...req,
+      max_tokens: 1,
+    } as AnthropicMessagesRequest);
+    const inputTokens = countRequestInputTokens(countCodexRequest);
     return c.json({ input_tokens: inputTokens });
   });
 
