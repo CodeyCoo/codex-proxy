@@ -16,6 +16,7 @@ import { AccountManagement } from "./pages/AccountManagement";
 import { UsageStats } from "./pages/UsageStats";
 import { LogsPage } from "./pages/LogsPage";
 import { ErrorsPage } from "./pages/ErrorsPage";
+import { Edge403Page } from "./pages/Edge403Page";
 import { useAccounts } from "../../shared/hooks/use-accounts";
 import { useErrorLogsCount } from "../../shared/hooks/use-error-logs";
 import { useProxies } from "../../shared/hooks/use-proxies";
@@ -67,6 +68,7 @@ const TABS: Array<{ hash: string; label: TranslationKey }> = [
   { hash: "#/proxies", label: "proxySettings" },
   { hash: "#/usage-stats", label: "usageStats" },
   { hash: "#/logs", label: "logs" },
+  { hash: "#/edge-403", label: "edge403Tab" },
   { hash: "#/errors", label: "errorsTab" },
   { hash: "#/settings", label: "settings" },
 ];
@@ -201,6 +203,10 @@ function Dashboard() {
 
           {activeTab === "#/logs" && (
             <LogsPage embedded />
+          )}
+
+          {activeTab === "#/edge-403" && (
+            <Edge403Page />
           )}
 
           {activeTab === "#/errors" && (
